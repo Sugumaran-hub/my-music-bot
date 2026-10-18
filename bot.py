@@ -8,11 +8,12 @@ import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER, COMM
 
+# Render Port Check Dummy Server
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Acoustic Vault Running!"
+    return "Acoustic Vault Audiophile Studio Live!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -34,13 +35,14 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').strip()
 
+# லைவ் புரோக்ரஸ் பார்
 def get_progress_bar(current, total):
     percent = int((current / total) * 100)
     filled = int(math.floor(10 * current / total))
     bar = '█' * filled + '░' * (10 - filled)
     return f"`[{bar}]` {percent}% ({current}/{total})"
 
-# Multiple API endpoints fallback
+# இரட்டை ஏபிஐ எண்ட்-பாயிண்ட்கள் (Fallback System)
 SAAVN_ENDPOINTS = [
     "https://saavn.dev/api",
     "https://saavn.me"
@@ -58,6 +60,7 @@ def fetch_api(path):
             continue
     return None
 
+# --- 1. தொடக்கத் திரை (START & QUALITY PROFILE) ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     if not is_authorized(message.chat.id):
@@ -81,7 +84,7 @@ def send_welcome(message):
         "✨ **Discography:** 1-Click Complete Album Download\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🎧 **Profile:** `{current_q}`\n\n"
-        "Paadal alladhu album theda keezhe ഉള്ള button-ai thodavum:"
+        "பாடல் அல்லது ஆல்பத்தைத் தேட கீழே உள்ள பட்டனைத் தொடவும்:"
     )
     bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -108,7 +111,7 @@ def save_quality(call):
     bot.answer_callback_query(call.id, text=f"Profile: {q}")
     send_welcome(call.message)
 
-# INLINE QUERY HANDLER
+# --- 2. இன்லைன் உடனடிப் பரிந்துரைகள் எஞ்சின் ---
 @bot.inline_handler(func=lambda query: True)
 def handle_inline(query):
     raw = query.query.strip()
@@ -128,7 +131,7 @@ def handle_inline(query):
         bot.answer_inline_query(query.id, [], cache_time=1)
         return
 
-    # ALBUM SEARCH
+    # ஆல்பம் தேடல்
     if is_album:
         data = fetch_api(f"/search/albums?query={requests.utils.quote(term)}")
         albums = data.get('results', []) if isinstance(data, dict) else []
@@ -168,7 +171,7 @@ def handle_inline(query):
                 )
             )
     else:
-        # SONG SEARCH
+        # பாடல் தேடல்
         data = fetch_api(f"/search/songs?query={requests.utils.quote(term)}")
         songs = data.get('results', []) if isinstance(data, dict) else []
 
@@ -197,6 +200,7 @@ def handle_inline(query):
 
     bot.answer_inline_query(query.id, results, cache_time=1)
 
+# --- 3. எச்டி கவர் மற்றும் ஐடி3 டேக்குடன் ஆடியோ அனுப்புதல் ---
 def deliver_song(chat_id, song_obj):
     title = clean_txt(song_obj.get('name', 'Track'))
     artist = clean_txt(song_obj.get('primaryArtists', 'Unknown'))
@@ -258,6 +262,7 @@ def deliver_song(chat_id, song_obj):
             os.remove(filename)
         return False
 
+# --- 4. முழு ஆல்பம் டவுன்லோட் & லைவ் புரோக்ரஸ் பார் ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_alb_"))
 def download_entire_album(call):
     alb_id = call.data.replace("dl_alb_", "")
@@ -268,7 +273,7 @@ def download_entire_album(call):
         songs = data.get('songs', []) if isinstance(data, dict) else []
 
         if not songs:
-            bot.send_message(call.message.chat.id, "❌ Paadalgal kidaikkavillai.")
+            bot.send_message(call.message.chat.id, "❌ பாடல்கள் கிடைக்கவில்லை.")
             return
 
         total_tracks = len(songs)
@@ -293,10 +298,11 @@ def download_entire_album(call):
             deliver_song(call.message.chat.id, s)
 
         bot.delete_message(call.message.chat.id, status_msg.message_id)
-        bot.send_message(call.message.chat.id, "✨ **Album download complete!**", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "✨ **முழு ஆல்பமும் வெற்றிகரமாக அனுப்பப்பட்டது!**", parse_mode="Markdown")
     except Exception:
-        bot.send_message(call.message.chat.id, "❌ Error in download.")
+        bot.send_message(call.message.chat.id, "❌ ஆல்பத்தைப் பதிவிறக்குவதில் பிழை ஏற்பட்டது.")
 
+# --- 5. தனிப் பாடல் பதிவிறக்கம் ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_sng_"))
 def download_single_song(call):
     s_id = call.data.replace("dl_sng_", "")
@@ -308,14 +314,15 @@ def download_single_song(call):
         if songs and songs[0]:
             deliver_song(call.message.chat.id, songs[0])
     except Exception:
-        bot.send_message(call.message.chat.id, "❌ Song download error.")
+        bot.send_message(call.message.chat.id, "❌ பாடல் பதிவிறக்கம் செய்ய முடியவில்லை.")
 
+# --- 6. நேரடி டெக்ஸ்ட் தேடல் ---
 @bot.message_handler(func=lambda msg: True)
 def fallback_search(message):
     if not is_authorized(message.chat.id):
         return
     text = message.text.strip()
-    status = bot.reply_to(message, f"⚡ `{text}` thedugiren...")
+    status = bot.reply_to(message, f"⚡ `{text}` தேடுகிறேன்...")
 
     try:
         data = fetch_api(f"/search/songs?query={requests.utils.quote(text)}")
@@ -324,10 +331,15 @@ def fallback_search(message):
         if songs:
             deliver_song(message.chat.id, songs[0])
         else:
-            bot.reply_to(message, "❌ Song kidaikkala. Inline button use pannunga.")
+            bot.reply_to(message, "❌ பாடல் கிடைக்கவில்லை. இன்லைன் பட்டனைப் பயன்படுத்தவும்.")
     except Exception:
-        bot.reply_to(message, "❌ Connection error.")
+        bot.reply_to(message, "❌ இணைப்பில் பிழை ஏற்பட்டது.")
 
+# --- 7. AUTO-FIX CONFLICT & POLLING RUNNER ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
-    bot.infinity_polling()
+    try:
+        bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
+    bot.infinity_polling(skip_pending=True)
