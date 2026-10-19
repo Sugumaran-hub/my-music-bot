@@ -23,7 +23,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 def clean_txt(text):
     if not text:
         return ""
-    return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
+    return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').strip()
 
 API_BASES = [
     "https://saavn.dev/api",
@@ -93,11 +93,7 @@ def send_audio_track(chat_id, song):
             except Exception:
                 pass
 
-        caption = (
-            f"Title: {title}\n"
-            f"Album: {album}\n"
-            f"Singers: {artist}"
-        )
+        caption = f"Title: {title}\nAlbum: {album}\nSingers: {artist}"
 
         with open(filename, 'rb') as f_audio:
             bot.send_audio(
@@ -116,12 +112,12 @@ def send_audio_track(chat_id, song):
             os.remove(filename)
         return False
 
-# --- 1. /START COMMAND ---
+# --- 1. START COMMAND (BUTTONS STRICTLY CONFIGURED) ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_sng = types.InlineKeyboardButton("Search song ↗️", switch_inline_query_current_chat="")
-    btn_alb = types.InlineKeyboardButton("Search album ↗️", switch_inline_query_current_chat="Album: ")
+    btn_sng = types.InlineKeyboardButton(text="Search song ↗️", switch_inline_query_current_chat="song: ")
+    btn_alb = types.InlineKeyboardButton(text="Search album ↗️", switch_inline_query_current_chat="album: ")
     markup.add(btn_sng, btn_alb)
 
     bot.send_message(message.chat.id, "🔎 Search Song in Inline Mode", reply_markup=markup)
@@ -137,6 +133,8 @@ def handle_inline(query):
     is_album = raw.lower().startswith("album:") or raw.lower().startswith("album ")
     if is_album:
         term = raw.split(":", 1)[-1].strip() if ":" in raw else raw[6:].strip()
+    elif raw.lower().startswith("song:"):
+        term = raw.split(":", 1)[-1].strip()
     else:
         term = raw
 
@@ -158,10 +156,9 @@ def handle_inline(query):
             thumb = imgs[-1].get('link') if isinstance(imgs, list) and imgs else (imgs if isinstance(imgs, str) else "")
 
             markup = types.InlineKeyboardMarkup(row_width=2)
-            markup.add(
-                types.InlineKeyboardButton("📥 Download Album ↗️", callback_data=f"alb_{alb_id}"),
-                types.InlineKeyboardButton("🔍 Search again ↗️", switch_inline_query_current_chat="Album: ")
-            )
+            btn_dl = types.InlineKeyboardButton(text="📥 Download Album ↗️", callback_data=f"alb_{alb_id}")
+            btn_again = types.InlineKeyboardButton(text="🔍 Search again ↗️", switch_inline_query_current_chat="album: ")
+            markup.add(btn_dl, btn_again)
 
             count_str = f"Total songs: {song_count}\n" if song_count else ""
             msg = (
@@ -200,7 +197,7 @@ def handle_inline(query):
             thumb = imgs[-1].get('link') if isinstance(imgs, list) and imgs else (imgs if isinstance(imgs, str) else "")
 
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps Master", callback_data=f"sng_{s_id}"))
+            markup.add(types.InlineKeyboardButton(text="⬇️ Download 320kbps Master", callback_data=f"sng_{s_id}"))
 
             msg_content = f"Title: {title}\nAlbum: {album}\nSingers: {artist}"
 
@@ -239,7 +236,7 @@ def callback_album(call):
         album_name = clean_txt(data[0].get('name') or data[0].get('title', 'Album'))
 
     if not songs:
-        bot.send_message(call.message.chat.id, "❌ Paadalgal kidaikkavillai.")
+        bot.send_message(call.message.chat.id, "❌ பாடல்கள் கிடைக்கவில்லை.")
         return
 
     if cover_img:
