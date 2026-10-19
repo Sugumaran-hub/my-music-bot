@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import threading
 import requests
 from flask import Flask
@@ -26,98 +25,57 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# Jiosaavn Search
-def saavn_search(query, search_type="song"):
-    url = "https://www.jiosaavn.com/api.php"
-    params = {
-        "__call": "autocomplete.get",
-        "_marker": "0",
-        "query": query,
-        "ctx": "web6dot0",
-        "_format": "json"
-    }
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res = requests.get(url, params=params, headers=headers, timeout=8).json()
-        if search_type == "album":
-            return res.get('albums', {}).get('data', [])
-        return res.get('songs', {}).get('data', [])
-    except Exception:
-        return []
+API_BASES = [
+    "https://saavn.dev/api",
+    "https://saavn.me",
+    "https://jiosaavn-api-privatecvc2.vercel.app"
+]
 
-def get_album_details(album_id):
-    url = "https://www.jiosaavn.com/api.php"
-    params = {
-        "__call": "content.getAlbumDetails",
-        "_marker": "0",
-        "albumid": album_id,
-        "ctx": "web6dot0",
-        "_format": "json"
-    }
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        return requests.get(url, params=params, headers=headers, timeout=10).json()
-    except Exception:
-        return None
-
-def get_song_details(song_id):
-    url = "https://www.jiosaavn.com/api.php"
-    params = {
-        "__call": "song.getDetails",
-        "pids": song_id,
-        "_marker": "0",
-        "ctx": "web6dot0",
-        "_format": "json"
-    }
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res = requests.get(url, params=params, headers=headers, timeout=10).json()
-        return res.get(song_id, {})
-    except Exception:
-        return None
-
-def extract_direct_url(encrypted_url):
-    url = "https://www.jiosaavn.com/api.php"
-    params = {
-        "__call": "song.generateAuthToken",
-        "url": encrypted_url,
-        "bitrate": "320",
-        "api_version": "4",
-        "_format": "json",
-        "ctx": "web6dot0",
-        "_marker": "0"
-    }
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res = requests.get(url, params=params, headers=headers, timeout=10).json()
-        auth_url = res.get('auth_url', '')
-        if auth_url:
-            return auth_url.replace("&amp;", "&").split("?")[0]
-    except Exception:
-        pass
+def req_api(path):
+    for base in API_BASES:
+        try:
+            r = requests.get(f"{base}{path}", timeout=6)
+            if r.status_code == 200:
+                js = r.json()
+                if isinstance(js, dict):
+                    if js.get('data'):
+                        return js.get('data')
+                    if js.get('results'):
+                        return js.get('results')
+                return js
+        except Exception:
+            continue
     return None
 
-def deliver_track(chat_id, s_data):
-    title = clean_txt(s_data.get('song') or s_data.get('title', 'Track'))
-    artist = clean_txt(s_data.get('primary_artists') or s_data.get('music', 'Unknown'))
-    album = clean_txt(s_data.get('album', 'Single'))
-    year = str(s_data.get('year', ''))
+def send_audio_track(chat_id, song):
+    title = clean_txt(song.get('name') or song.get('title', 'Track'))
+    artist = clean_txt(song.get('primaryArtists') or song.get('singers', 'Unknown'))
+    album_obj = song.get('album')
+    album = clean_txt(album_obj.get('name')) if isinstance(album_obj, dict) else clean_txt(str(album_obj or 'Single'))
+    year = str(song.get('year', ''))
 
-    enc_url = s_data.get('encrypted_media_url')
-    if not enc_url:
+    dl_urls = song.get('downloadUrl', [])
+    target_url = None
+    if isinstance(dl_urls, list) and dl_urls:
+        target_url = dl_urls[-1].get('link') or dl_urls[-1].get('url')
+    elif song.get('media_url'):
+        target_url = song.get('media_url')
+
+    if not target_url:
         return False
 
-    direct_link = extract_direct_url(enc_url)
-    if not direct_link:
-        return False
+    imgs = song.get('image', [])
+    cover_url = None
+    if isinstance(imgs, list) and imgs:
+        cover_url = imgs[-1].get('link') or imgs[-1].get('url')
+    elif isinstance(imgs, str):
+        cover_url = imgs
 
-    cover_url = s_data.get('image', '').replace("150x150", "500x500")
-    filename = f"track_{chat_id}_{abs(hash(title)) % 100000}.mp3"
-
+    filename = f"track_{chat_id}_{abs(hash(title)) % 10000}.mp3"
     try:
-        r = requests.get(direct_link, stream=True, timeout=30)
+        res = requests.get(target_url, stream=True, timeout=25)
         with open(filename, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
+            for chunk in res.iter_content(chunk_size=16384):
                 if chunk:
                     f.write(chunk)
 
@@ -135,15 +93,19 @@ def deliver_track(chat_id, s_data):
             except Exception:
                 pass
 
-        caption = f"🎵 *{title}*\n💿 *Album:* {album}\n🎤 *Singers:* {artist}"
-        with open(filename, 'rb') as audio_file:
+        caption = (
+            f"Title: {title}\n"
+            f"Album: {album}\n"
+            f"Singers: {artist}"
+        )
+
+        with open(filename, 'rb') as f_audio:
             bot.send_audio(
                 chat_id=chat_id,
-                audio=audio_file,
+                audio=f_audio,
                 title=title,
                 performer=artist,
-                caption=caption,
-                parse_mode="Markdown"
+                caption=caption
             )
 
         if os.path.exists(filename):
@@ -154,93 +116,168 @@ def deliver_track(chat_id, s_data):
             os.remove(filename)
         return False
 
-# --- 1. START COMMAND (ZERO ERROR GUARANTEE) ---
+# --- 1. /START COMMAND ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    text = (
-        "🎧 *Acoustic Vault Audiophile Studio*\n\n"
-        "Endha paadal alladhu album vendumo, adhan peyara inga direct-aa type panni send pannunga:\n\n"
-        "*(Udaaranam: `vaaranam aayiram` alladhu `adaye kolluthey`)*"
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_sng = types.InlineKeyboardButton("Search song ↗️", switch_inline_query_current_chat="")
+    btn_alb = types.InlineKeyboardButton("Search album ↗️", switch_inline_query_current_chat="Album: ")
+    markup.add(btn_sng, btn_alb)
 
-# --- 2. CALLBACK HANDLERS ---
+    bot.send_message(message.chat.id, "🔎 Search Song in Inline Mode", reply_markup=markup)
+
+# --- 2. INLINE SEARCH (EXACT CARDS) ---
+@bot.inline_handler(func=lambda query: True)
+def handle_inline(query):
+    raw = query.query.strip()
+    if not raw:
+        bot.answer_inline_query(query.id, [], cache_time=1)
+        return
+
+    is_album = raw.lower().startswith("album:") or raw.lower().startswith("album ")
+    if is_album:
+        term = raw.split(":", 1)[-1].strip() if ":" in raw else raw[6:].strip()
+    else:
+        term = raw
+
+    if not term:
+        bot.answer_inline_query(query.id, [], cache_time=1)
+        return
+
+    results = []
+    if is_album:
+        data = req_api(f"/search/albums?query={requests.utils.quote(term)}")
+        items = data.get('results', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        for alb in items[:10]:
+            alb_id = alb.get('id')
+            name = clean_txt(alb.get('name') or alb.get('title'))
+            artist = clean_txt(alb.get('primaryArtists') or alb.get('artist', 'Various Artists'))
+            year = alb.get('year', '')
+            song_count = alb.get('songCount') or alb.get('song_count', '')
+            imgs = alb.get('image', [])
+            thumb = imgs[-1].get('link') if isinstance(imgs, list) and imgs else (imgs if isinstance(imgs, str) else "")
+
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("📥 Download Album ↗️", callback_data=f"alb_{alb_id}"),
+                types.InlineKeyboardButton("🔍 Search again ↗️", switch_inline_query_current_chat="Album: ")
+            )
+
+            count_str = f"Total songs: {song_count}\n" if song_count else ""
+            msg = (
+                f"Album: {name}\n"
+                f"Description: Tamil Film · {artist}\n"
+                f"Language: Tamil\n"
+                f"{count_str}"
+                f"Year: {year}\n\n"
+                f"[⁠]({thumb})"
+            )
+
+            desc_text = f"{year} · Tamil Film · {artist}"
+            if song_count:
+                desc_text += f"\nTotal songs: {song_count}"
+
+            results.append(
+                types.InlineQueryResultArticle(
+                    id=f"alb_{alb_id}",
+                    title=name,
+                    description=desc_text,
+                    thumbnail_url=thumb,
+                    input_message_content=types.InputTextMessageContent(msg, parse_mode="Markdown"),
+                    reply_markup=markup
+                )
+            )
+    else:
+        data = req_api(f"/search/songs?query={requests.utils.quote(term)}")
+        items = data.get('results', []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        for sng in items[:10]:
+            s_id = sng.get('id')
+            title = clean_txt(sng.get('name') or sng.get('title'))
+            album_obj = sng.get('album')
+            album = clean_txt(album_obj.get('name')) if isinstance(album_obj, dict) else clean_txt(str(album_obj or 'Single'))
+            artist = clean_txt(sng.get('primaryArtists') or sng.get('singers', 'Unknown'))
+            imgs = sng.get('image', [])
+            thumb = imgs[-1].get('link') if isinstance(imgs, list) and imgs else (imgs if isinstance(imgs, str) else "")
+
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps Master", callback_data=f"sng_{s_id}"))
+
+            msg_content = f"Title: {title}\nAlbum: {album}\nSingers: {artist}"
+
+            results.append(
+                types.InlineQueryResultArticle(
+                    id=f"sng_{s_id}",
+                    title=title,
+                    description=f"{album} · {artist}",
+                    thumbnail_url=thumb,
+                    input_message_content=types.InputTextMessageContent(msg_content),
+                    reply_markup=markup
+                )
+            )
+
+    bot.answer_inline_query(query.id, results, cache_time=1)
+
+# --- 3. ALBUM FULL DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     alb_id = call.data.replace("alb_", "")
-    bot.answer_callback_query(call.id, text="Album ready aagiradhu...")
+    bot.answer_callback_query(call.id, text="Album loading...")
 
-    details = get_album_details(alb_id)
-    songs = details.get('list', []) if details else []
+    data = req_api(f"/albums?id={alb_id}")
+    songs = []
+    album_name = "Album"
+    cover_img = None
+
+    if isinstance(data, dict):
+        songs = data.get('songs', [])
+        album_name = clean_txt(data.get('name') or data.get('title', 'Album'))
+        imgs = data.get('image', [])
+        if isinstance(imgs, list) and imgs:
+            cover_img = imgs[-1].get('link') or imgs[-1].get('url')
+    elif isinstance(data, list) and data:
+        songs = data[0].get('songs', [])
+        album_name = clean_txt(data[0].get('name') or data[0].get('title', 'Album'))
 
     if not songs:
         bot.send_message(call.message.chat.id, "❌ Paadalgal kidaikkavillai.")
         return
 
-    status = bot.send_message(call.message.chat.id, f"⬇️ *{len(songs)} paadalgalum anuppappadugiradhu...*", parse_mode="Markdown")
+    if cover_img:
+        try:
+            bot.send_photo(call.message.chat.id, cover_img, caption=f"🗂 {album_name}")
+        except Exception:
+            pass
 
     for s in songs:
-        deliver_track(call.message.chat.id, s)
+        send_audio_track(call.message.chat.id, s)
 
-    bot.delete_message(call.message.chat.id, status.message_id)
-    bot.send_message(call.message.chat.id, "✅ *Muzhu album-mum vetrigaramaaga anuppappattadhu!*", parse_mode="Markdown")
-
+# --- 4. SINGLE SONG DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
-    bot.answer_callback_query(call.id, text="Paadal download aagiradhu...")
+    bot.answer_callback_query(call.id, text="Downloading song...")
 
-    s_data = get_song_details(s_id)
-    if s_data:
-        deliver_track(call.message.chat.id, s_data)
+    data = req_api(f"/songs?id={s_id}")
+    song = None
+    if isinstance(data, list) and data:
+        song = data[0]
+    elif isinstance(data, dict):
+        song = data.get('songs', [{}])[0] if data.get('songs') else data
+
+    if song:
+        send_audio_track(call.message.chat.id, song)
     else:
-        bot.send_message(call.message.chat.id, "❌ Download failure.")
+        bot.send_message(call.message.chat.id, "❌ Song download error.")
 
-# --- 3. DIRECT CHAT SEARCH (100% RELIABLE) ---
+# --- 5. DIRECT TEXT ---
 @bot.message_handler(func=lambda msg: True)
-def direct_text(message):
-    text = message.text.strip()
-    status = bot.reply_to(message, f"🔎 *'{text}'* thedugiren...", parse_mode="Markdown")
+def direct_text_search(message):
+    start_cmd(message)
 
-    albums = saavn_search(text, "album")
-    songs = saavn_search(text, "song")
-
-    try:
-        bot.delete_message(message.chat.id, status.message_id)
-    except Exception:
-        pass
-
-    if not albums and not songs:
-        bot.reply_to(message, "❌ Paadalgal kidaikkavillai. Correct spellings pottu thedunga.")
-        return
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    if albums:
-        for alb in albums[:2]:
-            alb_id = alb.get('id')
-            alb_title = clean_txt(alb.get('title'))
-            if alb_id and alb_title:
-                markup.add(types.InlineKeyboardButton(text=f"💿 Download Album: {alb_title}", callback_data=f"alb_{alb_id}"))
-
-    for s in songs[:6]:
-        s_id = s.get('id')
-        s_title = clean_txt(s.get('title'))
-        if s_id and s_title:
-            markup.add(types.InlineKeyboardButton(text=f"🎵 {s_title}", callback_data=f"sng_{s_id}"))
-
-    bot.send_message(message.chat.id, f"🎧 *'{text}' results:*", reply_markup=markup, parse_mode="Markdown")
-
-# --- 4. SAFE POLLER ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
     try:
         bot.remove_webhook()
     except Exception:
         pass
-    time.sleep(2)
-
-    while True:
-        try:
-            bot.polling(none_stop=True, interval=0, timeout=20)
-        except Exception:
-            time.sleep(3)
+    bot.infinity_polling(skip_pending=True)
