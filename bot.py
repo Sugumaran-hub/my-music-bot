@@ -1,14 +1,12 @@
 import os
 import re
 import time
-import base64
 import threading
 import requests
 from flask import Flask
 import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
-from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
@@ -23,7 +21,6 @@ def run_web():
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# In-Memory Cache to store album tokens and data
 album_token_store = {}
 
 def clean_txt(text):
@@ -50,12 +47,11 @@ def saavn_search(query, search_type="album"):
     except Exception:
         return []
 
-# ACCURATE ALBUM DETAILS & FULL SONGS FETCHER (Using Perma Token)
+# ACCURATE ALBUM DETAILS & FULL SONGS FETCHER
 def fetch_album_details_by_token(token_or_id):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     url = "https://www.jiosaavn.com/api.php"
 
-    # Method 1: Token Lookup (JioSaavn Official Web API)
     params_token = {
         "__call": "webapi.get",
         "token": str(token_or_id),
@@ -73,7 +69,6 @@ def fetch_album_details_by_token(token_or_id):
     except Exception:
         pass
 
-    # Method 2: Album ID Lookup
     params_id = {
         "__call": "content.getAlbumDetails",
         "_marker": "0",
@@ -89,55 +84,52 @@ def fetch_album_details_by_token(token_or_id):
     except Exception:
         pass
 
-    # Method 3: Search by Album Name
-    params_search = {
-        "__call": "search.getAlbumResults",
-        "_marker": "0",
-        "q": str(token_or_id),
-        "n": "1",
-        "p": "1",
+    return None, []
+
+# OFFICIAL DIRECT 320KBPS MEDIA LINK FETCHER
+def get_song_download_url(s_data):
+    song_id = s_data.get('id')
+    enc_url = s_data.get('encrypted_media_url')
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    url = "https://www.jiosaavn.com/api.php"
+
+    # Step 1: If enc_url is missing, fetch song details first
+    if not enc_url and song_id:
+        p_det = {
+            "__call": "song.getDetails",
+            "pids": str(song_id),
+            "_marker": "0",
+            "ctx": "web6dot0",
+            "_format": "json"
+        }
+        try:
+            r = requests.get(url, params=p_det, headers=headers, timeout=6).json()
+            s_obj = r.get(str(song_id), {})
+            enc_url = s_obj.get('encrypted_media_url')
+        except Exception:
+            pass
+
+    if not enc_url:
+        return None
+
+    # Step 2: Request direct auth stream URL
+    p_auth = {
+        "__call": "song.generateAuthToken",
+        "url": enc_url,
+        "bitrate": "320",
+        "api_version": "4",
+        "_format": "json",
         "ctx": "web6dot0",
-        "_format": "json"
+        "_marker": "0"
     }
     try:
-        r3 = requests.get(url, params=params_search, headers=headers, timeout=8).json()
-        results = r3.get('results', [])
-        if results and results[0].get('id'):
-            return fetch_album_details_by_token(results[0].get('id'))
+        res = requests.get(url, params=p_auth, headers=headers, timeout=8).json()
+        auth_url = res.get('auth_url', '')
+        if auth_url:
+            return auth_url.replace("&amp;", "&")
     except Exception:
         pass
 
-    return None, []
-
-# NATIVE DES DECRYPTION FOR 320KBPS MEDIA URL
-def decrypt_media_url(enc_url):
-    try:
-        key = b"38346591"
-        enc_data = base64.b64decode(enc_url.strip())
-        cipher = DES.new(key, DES.MODE_ECB)
-        dec_data = cipher.decrypt(enc_data)
-        pad = dec_data[-1]
-        dec_url = dec_data[:-pad].decode('utf-8')
-        dec_url = dec_url.replace("_96.mp4", "_320.mp4").replace(".mp4", ".mp3")
-        return dec_url
-    except Exception:
-        url = "https://www.jiosaavn.com/api.php"
-        params = {
-            "__call": "song.generateAuthToken",
-            "url": enc_url,
-            "bitrate": "320",
-            "api_version": "4",
-            "_format": "json",
-            "ctx": "web6dot0",
-            "_marker": "0"
-        }
-        try:
-            res = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=8).json()
-            auth_url = res.get('auth_url', '')
-            if auth_url:
-                return auth_url.replace("&amp;", "&").split("?")[0]
-        except Exception:
-            pass
     return None
 
 def send_audio_track(chat_id, s_data):
@@ -146,41 +138,40 @@ def send_audio_track(chat_id, s_data):
     album = clean_txt(s_data.get('album', 'Single'))
     year = str(s_data.get('year', ''))
 
-    enc_url = s_data.get('encrypted_media_url')
-    if not enc_url and s_data.get('id'):
-        url = "https://www.jiosaavn.com/api.php"
-        params = {"__call": "song.getDetails", "pids": s_data.get('id'), "_marker": "0", "ctx": "web6dot0", "_format": "json"}
-        try:
-            r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=6).json()
-            s_obj = r.get(s_data.get('id'), {})
-            enc_url = s_obj.get('encrypted_media_url')
-            if s_obj.get('song'):
-                title = clean_txt(s_obj.get('song'))
-            if s_obj.get('primary_artists'):
-                artist = clean_txt(s_obj.get('primary_artists'))
-        except Exception:
-            pass
-
-    if not enc_url:
-        return False
-
-    direct_link = decrypt_media_url(enc_url)
+    direct_link = get_song_download_url(s_data)
     if not direct_link:
         return False
 
     cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
     filename = f"track_{chat_id}_{abs(hash(title)) % 100000}.mp3"
+    thumb_file = f"thumb_{chat_id}_{abs(hash(title)) % 100000}.jpg"
 
     try:
-        r = requests.get(direct_link, stream=True, timeout=30)
+        # Download real audio stream
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(direct_link, stream=True, headers=headers, timeout=40)
+        
+        # Verify it's a real MP3/Audio stream (> 100 KB)
         with open(filename, 'wb') as f:
             for chunk in r.iter_content(chunk_size=16384):
                 if chunk:
                     f.write(chunk)
 
+        if os.path.getsize(filename) < 5000:
+            if os.path.exists(filename):
+                os.remove(filename)
+            return False
+
+        # Download thumbnail for Telegram audio player display
+        has_thumb = False
         if cover_url:
             try:
                 img_data = requests.get(cover_url, timeout=10).content
+                with open(thumb_file, 'wb') as f_thumb:
+                    f_thumb.write(img_data)
+                has_thumb = True
+
+                # Embed into ID3 metadata
                 audio = ID3(filename)
                 audio.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data))
                 audio.add(TIT2(encoding=3, text=title))
@@ -195,20 +186,35 @@ def send_audio_track(chat_id, s_data):
         caption = f"Title: {title}\nAlbum: {album}\nSingers: {artist}"
 
         with open(filename, 'rb') as audio_file:
-            bot.send_audio(
-                chat_id=chat_id,
-                audio=audio_file,
-                title=title,
-                performer=artist,
-                caption=caption
-            )
+            if has_thumb and os.path.exists(thumb_file):
+                with open(thumb_file, 'rb') as t_file:
+                    bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_file,
+                        thumb=t_file,
+                        title=title,
+                        performer=artist,
+                        caption=caption
+                    )
+            else:
+                bot.send_audio(
+                    chat_id=chat_id,
+                    audio=audio_file,
+                    title=title,
+                    performer=artist,
+                    caption=caption
+                )
 
         if os.path.exists(filename):
             os.remove(filename)
+        if os.path.exists(thumb_file):
+            os.remove(thumb_file)
         return True
     except Exception:
         if os.path.exists(filename):
             os.remove(filename)
+        if os.path.exists(thumb_file):
+            os.remove(thumb_file)
         return False
 
 # --- 1. /START COMMAND ---
@@ -249,24 +255,20 @@ def handle_inline(query):
             desc = clean_txt(alb.get('description', 'Tamil Album'))
             thumb = alb.get('image', '').replace("50x50", "500x500")
 
-            # Extract Year from description if not directly provided
             year = alb.get('year', '')
             if not year and desc:
                 year_match = re.search(r'\b(19\d{2}|20\d{2})\b', desc)
                 if year_match:
                     year = year_match.group(1)
 
-            # Extract Token or ID from URL for deep album lookup
             url_part = alb.get('url', '')
             token = url_part.split('/')[-1] if url_part else (alb.get('id') or name)
 
-            # Store mapping in short key to prevent callback data overflow
             short_key = f"alb_{idx}_{abs(hash(token)) % 10000}"
             album_token_store[short_key] = {"token": token, "name": name}
 
-            # Fetch song count for exact UI display
-            song_count = ""
             details, s_list = fetch_album_details_by_token(token)
+            song_count = ""
             if s_list:
                 song_count = str(len(s_list))
                 album_token_store[short_key]["songs"] = s_list
@@ -334,7 +336,7 @@ def callback_album(call):
     cached_songs = stored.get("songs")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text=f"'{album_name}' paadalkal ready aagudhu...")
+    bot.answer_callback_query(call.id, text=f"'{album_name}' songs download aagudhu...")
 
     songs = cached_songs
     if not songs:
