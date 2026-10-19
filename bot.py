@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import threading
 import requests
 from flask import Flask
@@ -44,13 +45,13 @@ def saavn_search(query, search_type="album"):
     except Exception:
         return []
 
-# BULLETPROOF ALBUM DETAILS FETCHER (Dual Method)
+# BULLETPROOF ALBUM DETAILS FETCHER
 def get_album_details(album_id):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
-    # Method 1: Direct albumid
-    url1 = "https://www.jiosaavn.com/api.php"
-    params1 = {
+    url = "https://www.jiosaavn.com/api.php"
+
+    # Attempt 1: Direct ID
+    p1 = {
         "__call": "content.getAlbumDetails",
         "_marker": "0",
         "albumid": str(album_id),
@@ -58,14 +59,14 @@ def get_album_details(album_id):
         "_format": "json"
     }
     try:
-        r1 = requests.get(url1, params=params1, headers=headers, timeout=8).json()
+        r1 = requests.get(url, params=p1, headers=headers, timeout=8).json()
         if r1 and r1.get('list'):
             return r1
     except Exception:
         pass
 
-    # Method 2: Token / URL search fallback
-    params2 = {
+    # Attempt 2: Token
+    p2 = {
         "__call": "webapi.get",
         "token": str(album_id),
         "type": "album",
@@ -75,7 +76,7 @@ def get_album_details(album_id):
         "_marker": "0"
     }
     try:
-        r2 = requests.get(url1, params=params2, headers=headers, timeout=8).json()
+        r2 = requests.get(url, params=p2, headers=headers, timeout=8).json()
         if r2 and r2.get('list'):
             return r2
     except Exception:
@@ -195,7 +196,6 @@ def handle_inline(query):
     if is_album:
         albums = saavn_search(term, "album")
         for alb in albums[:10]:
-            # id அல்லது url-ல் உள்ள token-ஐப் பயன்படுத்தும் முறை
             alb_id = alb.get('id') or alb.get('url', '').split('/')[-1]
             name = clean_txt(alb.get('title'))
             desc = clean_txt(alb.get('description', 'Tamil Album'))
@@ -308,10 +308,17 @@ def callback_song(call):
 def direct_text_search(message):
     start_cmd(message)
 
+# --- 6. CRASH-PROOF CONTINUOUS RUNNER ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
     try:
         bot.remove_webhook()
     except Exception:
         pass
-    bot.infinity_polling(skip_pending=True)
+    time.sleep(2)
+
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception:
+            time.sleep(3)
