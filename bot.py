@@ -25,7 +25,7 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# OFFICIAL JIOSAAVN DIRECT SEARCH (Zero External API Dependency)
+# OFFICIAL JIOSAAVN DIRECT SEARCH
 def saavn_search(query, search_type="album"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -147,7 +147,7 @@ def start_cmd(message):
 
     bot.send_message(message.chat.id, "🔎 Search Song in Inline Mode", reply_markup=markup)
 
-# --- 2. EXACT INLINE CARDS (TARGET BOT UI) ---
+# --- 2. EXACT INLINE CARDS ---
 @bot.inline_handler(func=lambda query: True)
 def handle_inline(query):
     raw = query.query.strip()
@@ -225,17 +225,20 @@ def handle_inline(query):
 
     bot.answer_inline_query(query.id, results, cache_time=1)
 
-# --- 3. BATCH ALBUM DOWNLOAD ---
+# --- 3. ALBUM FULL DOWNLOAD (SAFE CHAT_ID RESOLVER) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     alb_id = call.data.replace("alb_", "")
-    bot.answer_callback_query(call.id, text="Album loading...")
+    # Inline callback aayirunnaal call.message None aayirikkum, athinaal call.from_user.id edukkunnu
+    target_chat_id = call.message.chat.id if call.message else call.from_user.id
+    
+    bot.answer_callback_query(call.id, text="Album download thudangi, private chat check cheyyuka...")
 
     details = get_album_details(alb_id)
     songs = details.get('list', []) if details else []
 
     if not songs:
-        bot.send_message(call.message.chat.id, "❌ பாடல்கள் கிடைக்கவில்லை.")
+        bot.send_message(target_chat_id, "❌ Paadalgal kidaikkavillai.")
         return
 
     album_title = clean_txt(details.get('title', 'Album'))
@@ -243,17 +246,18 @@ def callback_album(call):
 
     if cover_img:
         try:
-            bot.send_photo(call.message.chat.id, cover_img, caption=f"🗂 {album_title}")
+            bot.send_photo(target_chat_id, cover_img, caption=f"🗂 {album_title}")
         except Exception:
             pass
 
     for s in songs:
-        send_audio_track(call.message.chat.id, s)
+        send_audio_track(target_chat_id, s)
 
 # --- 4. SINGLE SONG DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
+    target_chat_id = call.message.chat.id if call.message else call.from_user.id
     bot.answer_callback_query(call.id, text="Downloading song...")
 
     url = "https://www.jiosaavn.com/api.php"
@@ -269,15 +273,15 @@ def callback_song(call):
         res = requests.get(url, params=params, headers=headers, timeout=10).json()
         s_data = res.get(s_id, {})
         if s_data:
-            send_audio_track(call.message.chat.id, s_data)
+            send_audio_track(target_chat_id, s_data)
         else:
-            bot.send_message(call.message.chat.id, "❌ பாடல் கிடைக்கவில்லை.")
+            bot.send_message(target_chat_id, "❌ Paadal kidaikkavillai.")
     except Exception:
-        bot.send_message(call.message.chat.id, "❌ பிழை ஏற்பட்டது.")
+        bot.send_message(target_chat_id, "❌ Pizhai erpatatadhu.")
 
 # --- 5. DIRECT TEXT FALLBACK ---
 @bot.message_handler(func=lambda msg: True)
-def direct_text(message):
+def direct_text_search(message):
     start_cmd(message)
 
 if __name__ == '__main__':
