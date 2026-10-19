@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import threading
 import requests
 from flask import Flask
@@ -7,11 +8,12 @@ import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
 
+# Render Port Check Dummy Server
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Acoustic Vault Live!"
+    return "Acoustic Vault Online!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -160,7 +162,7 @@ def deliver_track(chat_id, s_data):
             os.remove(filename)
         return False
 
-# --- 1. START COMMAND (BUTTON SYNTAX FIXED) ---
+# --- 1. START COMMAND ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     if not is_authorized(message.chat.id):
@@ -302,11 +304,20 @@ def direct_text(message):
 
     bot.send_message(message.chat.id, f"🎧 *'{text}' முடிவுகள்:*", reply_markup=markup, parse_mode="Markdown")
 
-# --- 5. CLEAN POLLER ---
+# --- 5. CRASH-PROOF SAFE POLLER ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
+    
+    # பழைய Session-களைத் துண்டித்து 3 நொடிகள் அமைதி காக்கும்
     try:
-        bot.delete_webhook(drop_pending_updates=True)
+        bot.remove_webhook()
     except Exception:
         pass
-    bot.infinity_polling(skip_pending=True)
+    time.sleep(3)
+
+    # Infinite Reconnect Loop (எந்த 409 எரர் வந்தாலும் பாட் நிற்காது)
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception:
+            time.sleep(3)
