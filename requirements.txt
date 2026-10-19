@@ -2,4 +2,4 @@ pyTelegramBotAPI
 requests
 flask
 mutagen
-pycryptodome
+yt-dlp
