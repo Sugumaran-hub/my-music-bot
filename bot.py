@@ -1,6 +1,5 @@
 import os
 import re
-import math
 import threading
 import requests
 from flask import Flask
@@ -8,12 +7,11 @@ import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
 
-# Render Keep-Alive Port Server
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Acoustic Vault Engine is Active and Running!"
+    return "Acoustic Vault Live!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -22,7 +20,7 @@ def run_web():
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 OWNER_ID = os.environ.get('OWNER_ID')
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
+bot = telebot.TeleBot(BOT_TOKEN)
 
 def is_authorized(chat_id):
     if OWNER_ID and str(chat_id) != str(OWNER_ID):
@@ -34,7 +32,7 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# --- 100% DIRECT SAAVN SEARCH ENGINE (No Middleman Proxy) ---
+# Jiosaavn Search Core
 def saavn_search(query, search_type="song"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -44,9 +42,7 @@ def saavn_search(query, search_type="song"):
         "ctx": "web6dot0",
         "_format": "json"
     }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, params=params, headers=headers, timeout=6).json()
         if search_type == "album":
@@ -55,7 +51,6 @@ def saavn_search(query, search_type="song"):
     except Exception:
         return []
 
-# ஆல்பம் தகவல்களைப் பிரித்தெடுத்தல்
 def get_album_details(album_id):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -71,7 +66,6 @@ def get_album_details(album_id):
     except Exception:
         return None
 
-# பாடல் நேரடி டவுன்லோட் லிங்க் உருவாக்குதல்
 def get_song_details(song_id):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -109,7 +103,6 @@ def extract_direct_url(encrypted_url):
         pass
     return None
 
-# --- AUDIO TAGGING & DISPATCHER ---
 def deliver_track(chat_id, s_data):
     title = clean_txt(s_data.get('song') or s_data.get('title', 'Track'))
     artist = clean_txt(s_data.get('primary_artists') or s_data.get('music', 'Unknown'))
@@ -167,25 +160,25 @@ def deliver_track(chat_id, s_data):
             os.remove(filename)
         return False
 
-# --- START INTERFACE ---
+# --- 1. START COMMAND (BUTTON SYNTAX FIXED) ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     if not is_authorized(message.chat.id):
         return
 
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("Search song ↗️", switch_inline_query_current_chat=""),
-        types.InlineKeyboardButton("Search album ↗️", switch_inline_query_current_chat="album ")
-    )
+    btn_song = types.InlineKeyboardButton(text="Search song ↗️", switch_inline_query_current_chat="")
+    btn_album = types.InlineKeyboardButton(text="Search album ↗️", switch_inline_query_current_chat="album ")
+    markup.add(btn_song, btn_album)
 
     text = (
-        "🔍 *Search Song in Inline Mode*\n\n"
-        "கீழே உள்ள பட்டன்களைத் தொட்டோ அல்லது நேரடியாகப் படத்தின் பெயரை இங்கே மெசேஜாக அனுப்பியோ தேடலாம்:"
+        "🎧 *Acoustic Vault Audiophile Studio*\n\n"
+        "கீழே உள்ள பட்டன்களைத் தொட்டோ அல்லது நேரடியாகப் படத்தின் பெயரை இங்கே மெசேஜாக அனுப்பியோ தேடலாம்:\n"
+        "*(எ.கா: Vaaranam Aayiram)*"
     )
     bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
 
-# --- INLINE QUERY HANDLER (NO CLOUDFLARE BLOCK) ---
+# --- 2. INLINE SEARCH HANDLER ---
 @bot.inline_handler(func=lambda query: True)
 def inline_query(query):
     raw = query.query.strip()
@@ -211,7 +204,7 @@ def inline_query(query):
             thumb = alb.get('image', '').replace("50x50", "150x150")
 
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("📥 Download Entire Album", callback_data=f"alb_{alb_id}"))
+            markup.add(types.InlineKeyboardButton(text="📥 Download Entire Album", callback_data=f"alb_{alb_id}"))
 
             msg_text = f"💿 *Album:* {name}\n👤 *Info:* {desc}\n📅 *Year:* {year}\n\n[⁠]({thumb})"
             results.append(
@@ -233,7 +226,7 @@ def inline_query(query):
             thumb = sng.get('image', '').replace("50x50", "150x150")
 
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps MP3", callback_data=f"sng_{s_id}"))
+            markup.add(types.InlineKeyboardButton(text="⬇️ Download 320kbps MP3", callback_data=f"sng_{s_id}"))
 
             msg_text = f"🎵 *{title}*\n📝 {desc}"
             results.append(
@@ -249,7 +242,7 @@ def inline_query(query):
 
     bot.answer_inline_query(query.id, results, cache_time=1)
 
-# --- CALLBACK BUTTONS ---
+# --- 3. CALLBACK HANDLERS ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     alb_id = call.data.replace("alb_", "")
@@ -281,7 +274,7 @@ def callback_song(call):
     else:
         bot.send_message(call.message.chat.id, "❌ பாடல் பதிவிறக்கம் தோல்வியடைந்தது.")
 
-# --- DIRECT TEXT MESSAGE SEARCH (FAILSAFE) ---
+# --- 4. DIRECT CHAT SEARCH ---
 @bot.message_handler(func=lambda msg: True)
 def direct_text(message):
     if not is_authorized(message.chat.id):
@@ -302,14 +295,14 @@ def direct_text(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     if albums:
         alb = albums[0]
-        markup.add(types.InlineKeyboardButton(f"💿 Download Album: {clean_txt(alb.get('title'))}", callback_data=f"alb_{alb.get('id')}"))
+        markup.add(types.InlineKeyboardButton(text=f"💿 Download Album: {clean_txt(alb.get('title'))}", callback_data=f"alb_{alb.get('id')}"))
 
     for s in songs[:6]:
-        markup.add(types.InlineKeyboardButton(f"🎵 {clean_txt(s.get('title'))}", callback_data=f"sng_{s.get('id')}"))
+        markup.add(types.InlineKeyboardButton(text=f"🎵 {clean_txt(s.get('title'))}", callback_data=f"sng_{s.get('id')}"))
 
     bot.send_message(message.chat.id, f"🎧 *'{text}' முடிவுகள்:*", reply_markup=markup, parse_mode="Markdown")
 
-# --- CONFLICT-FREE POLLER ---
+# --- 5. CLEAN POLLER ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
     try:
