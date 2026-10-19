@@ -25,7 +25,7 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# OFFICIAL JIOSAAVN DIRECT SEARCH
+# JIOSAAVN AUTOCOMPLETE SEARCH
 def saavn_search(query, search_type="album"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -44,20 +44,44 @@ def saavn_search(query, search_type="album"):
     except Exception:
         return []
 
+# BULLETPROOF ALBUM DETAILS FETCHER (Dual Method)
 def get_album_details(album_id):
-    url = "https://www.jiosaavn.com/api.php"
-    params = {
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
+    # Method 1: Direct albumid
+    url1 = "https://www.jiosaavn.com/api.php"
+    params1 = {
         "__call": "content.getAlbumDetails",
         "_marker": "0",
-        "albumid": album_id,
+        "albumid": str(album_id),
         "ctx": "web6dot0",
         "_format": "json"
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        return requests.get(url, params=params, headers=headers, timeout=10).json()
+        r1 = requests.get(url1, params=params1, headers=headers, timeout=8).json()
+        if r1 and r1.get('list'):
+            return r1
     except Exception:
-        return None
+        pass
+
+    # Method 2: Token / URL search fallback
+    params2 = {
+        "__call": "webapi.get",
+        "token": str(album_id),
+        "type": "album",
+        "includeMetaTags": "0",
+        "ctx": "web6dot0",
+        "_format": "json",
+        "_marker": "0"
+    }
+    try:
+        r2 = requests.get(url1, params=params2, headers=headers, timeout=8).json()
+        if r2 and r2.get('list'):
+            return r2
+    except Exception:
+        pass
+
+    return None
 
 def extract_direct_url(encrypted_url):
     url = "https://www.jiosaavn.com/api.php"
@@ -171,7 +195,8 @@ def handle_inline(query):
     if is_album:
         albums = saavn_search(term, "album")
         for alb in albums[:10]:
-            alb_id = alb.get('id')
+            # id அல்லது url-ல் உள்ள token-ஐப் பயன்படுத்தும் முறை
+            alb_id = alb.get('id') or alb.get('url', '').split('/')[-1]
             name = clean_txt(alb.get('title'))
             desc = clean_txt(alb.get('description', 'Tamil Album'))
             year = alb.get('year', '')
@@ -225,14 +250,13 @@ def handle_inline(query):
 
     bot.answer_inline_query(query.id, results, cache_time=1)
 
-# --- 3. ALBUM FULL DOWNLOAD (SAFE CHAT_ID RESOLVER) ---
+# --- 3. ALBUM FULL DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     alb_id = call.data.replace("alb_", "")
-    # Inline callback aayirunnaal call.message None aayirikkum, athinaal call.from_user.id edukkunnu
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text="Album download thudangi, private chat check cheyyuka...")
+    bot.answer_callback_query(call.id, text="Album loading...")
 
     details = get_album_details(alb_id)
     songs = details.get('list', []) if details else []
