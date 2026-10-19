@@ -24,6 +24,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(BOT_TOKEN)
 
 album_token_store = {}
+user_quality_pref = {}  # Store quality per user: '320', '160', '96'
 
 def clean_txt(text):
     if not text:
@@ -89,7 +90,7 @@ def fetch_album_details_by_token(token_or_id):
     return None, []
 
 # NATIVE DES DECRYPTION FOR DIRECT JIOSAAVN MEDIA URL
-def decrypt_media_url(enc_url):
+def decrypt_media_url(enc_url, bitrate="320"):
     try:
         key = b"38346591"
         enc_data = base64.b64decode(enc_url.strip())
@@ -97,8 +98,10 @@ def decrypt_media_url(enc_url):
         dec_data = cipher.decrypt(enc_data)
         pad = dec_data[-1]
         dec_url = dec_data[:-pad].decode('utf-8')
-        # உயர்தர 320kbps ஆடியோ ஸ்ட்ரீமை நேரடியாக எடுத்தல்
-        dec_url = dec_url.replace("_96.mp4", "_320.mp4")
+        
+        # User Quality Bitrate Substitution
+        target_br = f"_{bitrate}.mp4" if bitrate in ["320", "160", "96"] else "_320.mp4"
+        dec_url = dec_url.replace("_96.mp4", target_br)
         return dec_url
     except Exception:
         pass
@@ -110,13 +113,14 @@ def send_audio_track(chat_id, s_data):
     album = clean_txt(s_data.get('album', 'Single'))
     year = str(s_data.get('year', ''))
 
+    # Fetch full song details if encrypted_media_url missing
     enc_url = s_data.get('encrypted_media_url')
     if not enc_url and s_data.get('id'):
         url = "https://www.jiosaavn.com/api.php"
-        params = {"__call": "song.getDetails", "pids": s_data.get('id'), "_marker": "0", "ctx": "web6dot0", "_format": "json"}
+        params = {"__call": "song.getDetails", "pids": str(s_data.get('id')), "_marker": "0", "ctx": "web6dot0", "_format": "json"}
         try:
             r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=6).json()
-            s_obj = r.get(s_data.get('id'), {})
+            s_obj = r.get(str(s_data.get('id')), {})
             enc_url = s_obj.get('encrypted_media_url')
             if s_obj.get('song'):
                 title = clean_txt(s_obj.get('song'))
@@ -128,12 +132,12 @@ def send_audio_track(chat_id, s_data):
     if not enc_url:
         return False
 
-    direct_link = decrypt_media_url(enc_url)
+    user_br = user_quality_pref.get(chat_id, "320")
+    direct_link = decrypt_media_url(enc_url, bitrate=user_br)
     if not direct_link:
         return False
 
     cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
-    # MP4 ஆடியோவை டெலிகிராம் ஆடியோ பிளேயருக்கு உகந்ததாகப் பதிவேற்றுதல்
     filename = f"track_{chat_id}_{abs(hash(title)) % 100000}.m4a"
     thumb_file = f"thumb_{chat_id}_{abs(hash(title)) % 100000}.jpg"
 
@@ -144,8 +148,7 @@ def send_audio_track(chat_id, s_data):
                 if chunk:
                     f.write(chunk)
 
-        # அசல் ஆடியோ ஃபைலா என்பதை உறுதி செய்தல் (> 500 KB)
-        if os.path.getsize(filename) < 500000:
+        if os.path.getsize(filename) < 200000:
             if os.path.exists(filename):
                 os.remove(filename)
             return False
@@ -194,21 +197,48 @@ def send_audio_track(chat_id, s_data):
             os.remove(thumb_file)
         return False
 
-# பின்னணியில் ஆல்பம் டவுன்லோட் செய்யும் செயல்பாடு (No Freezing)
 def process_album_download(songs, chat_id):
     for s in songs:
         send_audio_track(chat_id, s)
         time.sleep(1)
 
-# --- 1. /START COMMAND ---
+# --- 1. /START COMMAND WITH QUALITY TOGGLE ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
+    chat_id = message.chat.id
+    current_q = user_quality_pref.get(chat_id, "320")
+    
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_sng = types.InlineKeyboardButton("Search song ↗️", switch_inline_query_current_chat="song: ")
     btn_alb = types.InlineKeyboardButton("Search album ↗️", switch_inline_query_current_chat="album: ")
+    btn_quality = types.InlineKeyboardButton(f"⚙️ Audio Quality: {current_q}kbps", callback_data="open_quality_menu")
     markup.add(btn_sng, btn_alb)
+    markup.add(btn_quality)
 
     bot.send_message(message.chat.id, "🔎 Search Song in Inline Mode", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "open_quality_menu")
+def quality_menu(call):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("⚡ 320kbps Extreme (Default / Best for IEM)", callback_data="set_q_320"),
+        types.InlineKeyboardButton("🎧 160kbps High Quality (Balanced)", callback_data="set_q_160"),
+        types.InlineKeyboardButton("💾 96kbps Medium (Data Saver)", callback_data="set_q_96")
+    )
+    bot.edit_message_text(
+        "🎚 **விருப்பமான ஆடியோ தரத்தைத் தேர்வு செய்யவும்:**",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("set_q_"))
+def apply_quality(call):
+    q_val = call.data.replace("set_q_", "")
+    user_quality_pref[call.message.chat.id] = q_val
+    bot.answer_callback_query(call.id, text=f"Audio quality {q_val}kbps-ஆக அமைக்கப்பட்டது!")
+    start_cmd(call.message)
 
 # --- 2. EXACT INLINE CARDS ---
 @bot.inline_handler(func=lambda query: True)
@@ -286,8 +316,8 @@ def handle_inline(query):
             )
     else:
         songs = saavn_search(term, "song")
-        for sng in songs[:10]:
-            s_id = sng.get('id')
+        for idx, sng in enumerate(songs[:10]):
+            s_id = str(sng.get('id'))
             title = clean_txt(sng.get('title'))
             desc = clean_txt(sng.get('description', 'Single Track'))
             thumb = sng.get('image', '').replace("50x50", "500x500")
@@ -310,7 +340,7 @@ def handle_inline(query):
 
     bot.answer_inline_query(query.id, results, cache_time=1)
 
-# --- 3. ALBUM FULL DOWNLOAD (BACKGROUND THREAD) ---
+# --- 3. ALBUM FULL DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     stored = album_token_store.get(call.data, {})
@@ -319,7 +349,7 @@ def callback_album(call):
     cached_songs = stored.get("songs")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் பதிவிறக்கமாகின்றன...")
+    bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் தயாராகின்றன...")
 
     songs = cached_songs
     if not songs:
@@ -329,12 +359,10 @@ def callback_album(call):
         bot.send_message(target_chat_id, "❌ பாடல்கள் கிடைக்கவில்லை.")
         return
 
-    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் அனுப்பப்படுகின்றன...", parse_mode="Markdown")
-
-    # பாட் ஃப்ரீஸ் ஆகாமல் இருக்க தனி Background Thread-ல் இயக்குதல்
+    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
     threading.Thread(target=process_album_download, args=(songs, target_chat_id)).start()
 
-# --- 4. SINGLE SONG DOWNLOAD ---
+# --- 4. SINGLE SONG DOWNLOAD (FIXED SONG DETECTOR) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
@@ -344,16 +372,16 @@ def callback_song(call):
     url = "https://www.jiosaavn.com/api.php"
     params = {
         "__call": "song.getDetails",
-        "pids": s_id,
+        "pids": str(s_id),
         "_marker": "0",
         "ctx": "web6dot0",
         "_format": "json"
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         res = requests.get(url, params=params, headers=headers, timeout=10).json()
-        s_data = res.get(s_id, {})
-        if s_data:
+        s_data = res.get(str(s_id), {}) or (res.get('songs', [{}])[0] if res.get('songs') else {})
+        if s_data and (s_data.get('encrypted_media_url') or s_data.get('id')):
             threading.Thread(target=send_audio_track, args=(target_chat_id, s_data)).start()
         else:
             bot.send_message(target_chat_id, "❌ பாடல் கிடைக்கவில்லை.")
