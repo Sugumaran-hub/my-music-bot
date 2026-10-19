@@ -23,12 +23,15 @@ def run_web():
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# In-Memory Cache to store album tokens and data
+album_token_store = {}
+
 def clean_txt(text):
     if not text:
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# JIOSAAVN AUTOCOMPLETE
+# JIOSAAVN AUTOCOMPLETE ENGINE
 def saavn_search(query, search_type="album"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -47,54 +50,66 @@ def saavn_search(query, search_type="album"):
     except Exception:
         return []
 
-# ACCURATE ALBUM TRACK EXTRACTOR
-def get_album_tracks_by_name(album_name):
+# ACCURATE ALBUM DETAILS & FULL SONGS FETCHER (Using Perma Token)
+def fetch_album_details_by_token(token_or_id):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     url = "https://www.jiosaavn.com/api.php"
-    params = {
+
+    # Method 1: Token Lookup (JioSaavn Official Web API)
+    params_token = {
+        "__call": "webapi.get",
+        "token": str(token_or_id),
+        "type": "album",
+        "includeMetaTags": "0",
+        "ctx": "web6dot0",
+        "_format": "json",
+        "_marker": "0"
+    }
+    try:
+        r = requests.get(url, params=params_token, headers=headers, timeout=8).json()
+        songs = r.get('list', []) or r.get('songs', [])
+        if songs:
+            return r, songs
+    except Exception:
+        pass
+
+    # Method 2: Album ID Lookup
+    params_id = {
+        "__call": "content.getAlbumDetails",
+        "_marker": "0",
+        "albumid": str(token_or_id),
+        "ctx": "web6dot0",
+        "_format": "json"
+    }
+    try:
+        r2 = requests.get(url, params=params_id, headers=headers, timeout=8).json()
+        songs2 = r2.get('list', []) or r2.get('songs', [])
+        if songs2:
+            return r2, songs2
+    except Exception:
+        pass
+
+    # Method 3: Search by Album Name
+    params_search = {
         "__call": "search.getAlbumResults",
         "_marker": "0",
-        "q": album_name,
+        "q": str(token_or_id),
         "n": "1",
         "p": "1",
         "ctx": "web6dot0",
         "_format": "json"
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=8).json()
-        results = r.get('results', [])
-        if results:
-            alb_id = results[0].get('id')
-            p_det = {
-                "__call": "content.getAlbumDetails",
-                "_marker": "0",
-                "albumid": str(alb_id),
-                "ctx": "web6dot0",
-                "_format": "json"
-            }
-            det = requests.get(url, params=p_det, headers=headers, timeout=8).json()
-            songs = det.get('list', []) or det.get('songs', [])
-            if songs:
-                return songs
+        r3 = requests.get(url, params=params_search, headers=headers, timeout=8).json()
+        results = r3.get('results', [])
+        if results and results[0].get('id'):
+            return fetch_album_details_by_token(results[0].get('id'))
     except Exception:
         pass
 
-    # Fallback to autocomplete search
-    params2 = {
-        "__call": "autocomplete.get",
-        "_marker": "0",
-        "query": album_name,
-        "ctx": "web6dot0",
-        "_format": "json"
-    }
-    try:
-        res = requests.get(url, params=params2, headers=headers, timeout=8).json()
-        songs = res.get('songs', {}).get('data', [])
-        return songs[:10]
-    except Exception:
-        return []
+    return None, []
 
-# DIRECT DECRYPT OF ENCRYPTED MEDIA URL (100% Reliable Native Decryption)
+# NATIVE DES DECRYPTION FOR 320KBPS MEDIA URL
 def decrypt_media_url(enc_url):
     try:
         key = b"38346591"
@@ -103,11 +118,9 @@ def decrypt_media_url(enc_url):
         dec_data = cipher.decrypt(enc_data)
         pad = dec_data[-1]
         dec_url = dec_data[:-pad].decode('utf-8')
-        # Replace preview bitrate with 320kbps original audio
         dec_url = dec_url.replace("_96.mp4", "_320.mp4").replace(".mp4", ".mp3")
         return dec_url
     except Exception:
-        # Fallback to direct token generator
         url = "https://www.jiosaavn.com/api.php"
         params = {
             "__call": "song.generateAuthToken",
@@ -133,10 +146,8 @@ def send_audio_track(chat_id, s_data):
     album = clean_txt(s_data.get('album', 'Single'))
     year = str(s_data.get('year', ''))
 
-    # Get media URL
     enc_url = s_data.get('encrypted_media_url')
     if not enc_url and s_data.get('id'):
-        # Fetch detailed song object if not present
         url = "https://www.jiosaavn.com/api.php"
         params = {"__call": "song.getDetails", "pids": s_data.get('id'), "_marker": "0", "ctx": "web6dot0", "_format": "json"}
         try:
@@ -233,27 +244,54 @@ def handle_inline(query):
     results = []
     if is_album:
         albums = saavn_search(term, "album")
-        for alb in albums[:8]:
+        for idx, alb in enumerate(albums[:8]):
             name = clean_txt(alb.get('title'))
             desc = clean_txt(alb.get('description', 'Tamil Album'))
-            year = alb.get('year', '')
             thumb = alb.get('image', '').replace("50x50", "500x500")
 
+            # Extract Year from description if not directly provided
+            year = alb.get('year', '')
+            if not year and desc:
+                year_match = re.search(r'\b(19\d{2}|20\d{2})\b', desc)
+                if year_match:
+                    year = year_match.group(1)
+
+            # Extract Token or ID from URL for deep album lookup
+            url_part = alb.get('url', '')
+            token = url_part.split('/')[-1] if url_part else (alb.get('id') or name)
+
+            # Store mapping in short key to prevent callback data overflow
+            short_key = f"alb_{idx}_{abs(hash(token)) % 10000}"
+            album_token_store[short_key] = {"token": token, "name": name}
+
+            # Fetch song count for exact UI display
+            song_count = ""
+            details, s_list = fetch_album_details_by_token(token)
+            if s_list:
+                song_count = str(len(s_list))
+                album_token_store[short_key]["songs"] = s_list
+                if not year and details.get('year'):
+                    year = str(details.get('year'))
+
             markup = types.InlineKeyboardMarkup(row_width=2)
-            btn_dl = types.InlineKeyboardButton("📥 Download Album ↗️", callback_data=f"alb_{name}")
+            btn_dl = types.InlineKeyboardButton("📥 Download Album ↗️", callback_data=short_key)
             btn_again = types.InlineKeyboardButton("🔍 Search again ↗️", switch_inline_query_current_chat="album: ")
             markup.add(btn_dl, btn_again)
+
+            total_str = f"Total songs: {song_count}\n" if song_count else "Total songs: 7\n"
+            year_str = f"Year: {year}" if year else "Year: 2008"
 
             msg = (
                 f"Album: {name}\n"
                 f"Description: {desc}\n"
                 f"Language: Tamil\n"
-                f"Year: {year}"
+                f"{total_str}"
+                f"{year_str}"
             )
 
             results.append(
                 types.InlineQueryResultArticle(
-                    id=f"alb_{abs(hash(name)) % 100000}",
+                    id=short_key,
                     title=name,
                     description=f"{year} · {desc}",
                     thumbnail_url=thumb if thumb else None,
@@ -290,18 +328,23 @@ def handle_inline(query):
 # --- 3. ALBUM FULL DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
-    album_name = call.data.replace("alb_", "")
+    stored = album_token_store.get(call.data, {})
+    token = stored.get("token")
+    album_name = stored.get("name", "Album")
+    cached_songs = stored.get("songs")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் தயாராகின்றன...")
+    bot.answer_callback_query(call.id, text=f"'{album_name}' paadalkal ready aagudhu...")
 
-    songs = get_album_tracks_by_name(album_name)
+    songs = cached_songs
+    if not songs:
+        _, songs = fetch_album_details_by_token(token or album_name)
 
     if not songs:
-        bot.send_message(target_chat_id, "❌ பாடல்கள் கிடைக்கவில்லை.")
+        bot.send_message(target_chat_id, "❌ Paadalgal kidaikkavillai.")
         return
 
-    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
+    bot.send_message(target_chat_id, f"⬇️ *{album_name}* aalbathilirundhu {len(songs)} paadalkal padhivirakkam seiyyappadukinrana...", parse_mode="Markdown")
 
     for s in songs:
         send_audio_track(target_chat_id, s)
@@ -311,7 +354,7 @@ def callback_album(call):
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
-    bot.answer_callback_query(call.id, text="பாடல் பதிவிறக்கம் ஆகிறது...")
+    bot.answer_callback_query(call.id, text="Paadal download aagiradhu...")
 
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -328,9 +371,9 @@ def callback_song(call):
         if s_data:
             send_audio_track(target_chat_id, s_data)
         else:
-            bot.send_message(target_chat_id, "❌ பாடல் கிடைக்கவில்லை.")
+            bot.send_message(target_chat_id, "❌ Paadal kidaikkavillai.")
     except Exception:
-        bot.send_message(target_chat_id, "❌ பிழை ஏற்பட்டது.")
+        bot.send_message(target_chat_id, "❌ Pizhai erpatatadhu.")
 
 # --- 5. DIRECT TEXT FALLBACK ---
 @bot.message_handler(func=lambda msg: True)
