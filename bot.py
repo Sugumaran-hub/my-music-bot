@@ -21,16 +21,12 @@ def run_web():
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# In-Memory Cache to beat 64-byte limit & API delays
-album_store = {}
-song_store = {}
-
 def clean_txt(text):
     if not text:
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# JIOSAAVN AUTOCOMPLETE ENGINE
+# JIOSAAVN DIRECT SEARCH & RESOLVER
 def saavn_search(query, search_type="album"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -49,38 +45,37 @@ def saavn_search(query, search_type="album"):
     except Exception:
         return []
 
-# ACCURATE ALBUM TRACKLIST EXTRACTOR
-def fetch_album_tracks(album_name):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+# ACCURATE ALBUM TRACK EXTRACTOR VIA SONG SEARCH MATCHING
+def get_album_tracks_by_name(album_name):
     url = "https://www.jiosaavn.com/api.php"
-
     params = {
-        "__call": "search.getAlbumResults",
+        "__call": "autocomplete.get",
         "_marker": "0",
-        "q": album_name,
-        "n": "1",
-        "p": "1",
+        "query": album_name,
         "ctx": "web6dot0",
         "_format": "json"
     }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=8).json()
-        results = r.get('results', [])
-        if results:
-            alb_id = results[0].get('id')
-            p_det = {
-                "__call": "content.getAlbumDetails",
-                "_marker": "0",
-                "albumid": str(alb_id),
-                "ctx": "web6dot0",
-                "_format": "json"
-            }
-            det = requests.get(url, params=p_det, headers=headers, timeout=8).json()
-            songs = det.get('list', []) or det.get('songs', [])
-            return det, songs
+        res = requests.get(url, params=params, headers=headers, timeout=8).json()
+        songs = res.get('songs', {}).get('data', [])
+        
+        # Filter songs belonging to this exact album or matching title
+        matched_songs = []
+        album_lower = album_name.lower()
+        
+        for s in songs:
+            s_album = clean_txt(s.get('album', '')).lower()
+            if album_lower in s_album or s.get('id'):
+                matched_songs.append(s)
+                
+        # Fallback: if filtered is empty, return top songs from autocomplete
+        if not matched_songs:
+            matched_songs = songs[:8]
+            
+        return matched_songs
     except Exception:
-        pass
-    return None, []
+        return []
 
 def extract_direct_url(encrypted_url):
     url = "https://www.jiosaavn.com/api.php"
@@ -117,7 +112,8 @@ def send_audio_track(chat_id, s_data):
     if not direct_link:
         return False
 
-    cover_url = s_data.get('image', '').replace("150x150", "500x500")
+    # Ensure clean official high-res cover art (Replacing low-res or bad thumbnails)
+    cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
     filename = f"track_{chat_id}_{abs(hash(title)) % 100000}.mp3"
 
     try:
@@ -193,18 +189,14 @@ def handle_inline(query):
     results = []
     if is_album:
         albums = saavn_search(term, "album")
-        for idx, alb in enumerate(albums[:8]):
+        for alb in albums[:8]:
             name = clean_txt(alb.get('title'))
             desc = clean_txt(alb.get('description', 'Tamil Album'))
             year = alb.get('year', '')
-            thumb = alb.get('image', '').replace("50x50", "150x150")
-
-            # Store short ID for safe callback query
-            short_key = f"a_{idx}_{abs(hash(name)) % 10000}"
-            album_store[short_key] = name
+            thumb = alb.get('image', '').replace("50x50", "500x500")
 
             markup = types.InlineKeyboardMarkup(row_width=2)
-            btn_dl = types.InlineKeyboardButton("📥 Download Album ↗️", callback_data=short_key)
+            btn_dl = types.InlineKeyboardButton("📥 Download Album ↗️", callback_data=f"alb_{name}")
             btn_again = types.InlineKeyboardButton("🔍 Search again ↗️", switch_inline_query_current_chat="album: ")
             markup.add(btn_dl, btn_again)
 
@@ -217,7 +209,7 @@ def handle_inline(query):
 
             results.append(
                 types.InlineQueryResultArticle(
-                    id=short_key,
+                    id=f"alb_{abs(hash(name)) % 100000}",
                     title=name,
                     description=f"{year} · {desc}",
                     thumbnail_url=thumb if thumb else None,
@@ -227,23 +219,20 @@ def handle_inline(query):
             )
     else:
         songs = saavn_search(term, "song")
-        for idx, sng in enumerate(songs[:10]):
+        for sng in songs[:10]:
             s_id = sng.get('id')
             title = clean_txt(sng.get('title'))
             desc = clean_txt(sng.get('description', 'Single Track'))
-            thumb = sng.get('image', '').replace("50x50", "150x150")
-
-            short_s_key = f"s_{idx}_{s_id}"
-            song_store[short_s_key] = s_id
+            thumb = sng.get('image', '').replace("50x50", "500x500")
 
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps MP3", callback_data=short_s_key))
+            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps MP3", callback_data=f"sng_{s_id}"))
 
             msg_content = f"Title: {title}\nSingers: {desc}"
 
             results.append(
                 types.InlineQueryResultArticle(
-                    id=short_s_key,
+                    id=f"sng_{s_id}",
                     title=title,
                     description=desc,
                     thumbnail_url=thumb if thumb else None,
@@ -255,38 +244,28 @@ def handle_inline(query):
     bot.answer_inline_query(query.id, results, cache_time=1)
 
 # --- 3. ALBUM FULL DOWNLOAD ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith("a_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
-    album_name = album_store.get(call.data)
+    album_name = call.data.replace("alb_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
-
-    if not album_name:
-        bot.answer_callback_query(call.id, text="ஆல்பம் தகவல் புதுப்பிக்கப்படுகிறது...")
-        # Fallback to direct name search
-        album_name = "Vaaranam Aayiram"
-
+    
     bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் தயாராகின்றன...")
 
-    det, songs = fetch_album_tracks(album_name)
+    songs = get_album_tracks_by_name(album_name)
 
     if not songs:
         bot.send_message(target_chat_id, "❌ Paadalgal kidaikkavillai.")
         return
 
-    cover_img = det.get('image', '').replace("150x150", "500x500") if det else None
-    if cover_img:
-        try:
-            bot.send_photo(target_chat_id, cover_img, caption=f"🗂 {album_name}")
-        except Exception:
-            pass
+    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
 
     for s in songs:
         send_audio_track(target_chat_id, s)
 
 # --- 4. SINGLE SONG DOWNLOAD ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith("s_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
-    s_id = song_store.get(call.data) or call.data.split("_")[-1]
+    s_id = call.data.replace("sng_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     bot.answer_callback_query(call.id, text="Downloading song...")
 
@@ -319,7 +298,7 @@ if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
     try:
         bot.remove_webhook()
-    except Exception:
+    exceptException:
         pass
     time.sleep(2)
 
