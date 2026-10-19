@@ -8,7 +8,6 @@ import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
 
-# Render Port Check Dummy Server
 app = Flask(__name__)
 
 @app.route('/')
@@ -20,21 +19,14 @@ def run_web():
     app.run(host="0.0.0.0", port=port)
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-OWNER_ID = os.environ.get('OWNER_ID')
-
 bot = telebot.TeleBot(BOT_TOKEN)
-
-def is_authorized(chat_id):
-    if OWNER_ID and str(chat_id) != str(OWNER_ID):
-        return False
-    return True
 
 def clean_txt(text):
     if not text:
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# Jiosaavn Search Core
+# Jiosaavn Search
 def saavn_search(query, search_type="song"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -46,7 +38,7 @@ def saavn_search(query, search_type="song"):
     }
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=6).json()
+        res = requests.get(url, params=params, headers=headers, timeout=8).json()
         if search_type == "album":
             return res.get('albums', {}).get('data', [])
         return res.get('songs', {}).get('data', [])
@@ -162,160 +154,91 @@ def deliver_track(chat_id, s_data):
             os.remove(filename)
         return False
 
-# --- 1. START COMMAND ---
+# --- 1. START COMMAND (ZERO ERROR GUARANTEE) ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    if not is_authorized(message.chat.id):
-        return
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_song = types.InlineKeyboardButton(text="Search song ↗️", switch_inline_query_current_chat="")
-    btn_album = types.InlineKeyboardButton(text="Search album ↗️", switch_inline_query_current_chat="album ")
-    markup.add(btn_song, btn_album)
-
     text = (
         "🎧 *Acoustic Vault Audiophile Studio*\n\n"
-        "கீழே உள்ள பட்டன்களைத் தொட்டோ அல்லது நேரடியாகப் படத்தின் பெயரை இங்கே மெசேஜாக அனுப்பியோ தேடலாம்:\n"
-        "*(எ.கா: Vaaranam Aayiram)*"
+        "Endha paadal alladhu album vendumo, adhan peyara inga direct-aa type panni send pannunga:\n\n"
+        "*(Udaaranam: `vaaranam aayiram` alladhu `adaye kolluthey`)*"
     )
-    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
-# --- 2. INLINE SEARCH HANDLER ---
-@bot.inline_handler(func=lambda query: True)
-def inline_query(query):
-    raw = query.query.strip()
-    if not raw:
-        bot.answer_inline_query(query.id, [], cache_time=1)
-        return
-
-    is_album = raw.lower().startswith("album ")
-    term = raw[6:].strip() if is_album else raw
-
-    if not term:
-        bot.answer_inline_query(query.id, [], cache_time=1)
-        return
-
-    results = []
-    if is_album:
-        albums = saavn_search(term, "album")
-        for alb in albums[:8]:
-            alb_id = alb.get('id')
-            name = clean_txt(alb.get('title'))
-            desc = clean_txt(alb.get('description', 'Tamil Album'))
-            year = alb.get('year', '')
-            thumb = alb.get('image', '').replace("50x50", "150x150")
-
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(text="📥 Download Entire Album", callback_data=f"alb_{alb_id}"))
-
-            msg_text = f"💿 *Album:* {name}\n👤 *Info:* {desc}\n📅 *Year:* {year}\n\n[⁠]({thumb})"
-            results.append(
-                types.InlineQueryResultArticle(
-                    id=f"alb_{alb_id}",
-                    title=f"💿 {name} ({year})",
-                    description=desc,
-                    thumb_url=thumb,
-                    input_message_content=types.InputTextMessageContent(msg_text, parse_mode="Markdown"),
-                    reply_markup=markup
-                )
-            )
-    else:
-        songs = saavn_search(term, "song")
-        for sng in songs[:10]:
-            s_id = sng.get('id')
-            title = clean_txt(sng.get('title'))
-            desc = clean_txt(sng.get('description', 'Single Track'))
-            thumb = sng.get('image', '').replace("50x50", "150x150")
-
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(text="⬇️ Download 320kbps MP3", callback_data=f"sng_{s_id}"))
-
-            msg_text = f"🎵 *{title}*\n📝 {desc}"
-            results.append(
-                types.InlineQueryResultArticle(
-                    id=f"sng_{s_id}",
-                    title=f"🎵 {title}",
-                    description=desc,
-                    thumb_url=thumb,
-                    input_message_content=types.InputTextMessageContent(msg_text, parse_mode="Markdown"),
-                    reply_markup=markup
-                )
-            )
-
-    bot.answer_inline_query(query.id, results, cache_time=1)
-
-# --- 3. CALLBACK HANDLERS ---
+# --- 2. CALLBACK HANDLERS ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     alb_id = call.data.replace("alb_", "")
-    bot.answer_callback_query(call.id, text="ஆல்பம் தகவல்கள் பெறப்படுகின்றன...")
+    bot.answer_callback_query(call.id, text="Album ready aagiradhu...")
 
     details = get_album_details(alb_id)
     songs = details.get('list', []) if details else []
 
     if not songs:
-        bot.send_message(call.message.chat.id, "❌ பாடல்கள் கிடைக்கவில்லை.")
+        bot.send_message(call.message.chat.id, "❌ Paadalgal kidaikkavillai.")
         return
 
-    status = bot.send_message(call.message.chat.id, f"⬇️ *{len(songs)} பாடல்களும் பதிவிறக்கம் ஆகின்றன...*", parse_mode="Markdown")
+    status = bot.send_message(call.message.chat.id, f"⬇️ *{len(songs)} paadalgalum anuppappadugiradhu...*", parse_mode="Markdown")
 
     for s in songs:
         deliver_track(call.message.chat.id, s)
 
     bot.delete_message(call.message.chat.id, status.message_id)
-    bot.send_message(call.message.chat.id, "✅ *முழு ஆல்பமும் வெற்றிகரமாக அனுப்பப்பட்டது!*", parse_mode="Markdown")
+    bot.send_message(call.message.chat.id, "✅ *Muzhu album-mum vetrigaramaaga anuppappattadhu!*", parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
-    bot.answer_callback_query(call.id, text="பாடல் பதிவிறக்கம் ஆகிறது...")
+    bot.answer_callback_query(call.id, text="Paadal download aagiradhu...")
 
     s_data = get_song_details(s_id)
     if s_data:
         deliver_track(call.message.chat.id, s_data)
     else:
-        bot.send_message(call.message.chat.id, "❌ பாடல் பதிவிறக்கம் தோல்வியடைந்தது.")
+        bot.send_message(call.message.chat.id, "❌ Download failure.")
 
-# --- 4. DIRECT CHAT SEARCH ---
+# --- 3. DIRECT CHAT SEARCH (100% RELIABLE) ---
 @bot.message_handler(func=lambda msg: True)
 def direct_text(message):
-    if not is_authorized(message.chat.id):
-        return
-
     text = message.text.strip()
-    status = bot.reply_to(message, f"🔎 *'{text}'* தேடுகிறேன்...", parse_mode="Markdown")
+    status = bot.reply_to(message, f"🔎 *'{text}'* thedugiren...", parse_mode="Markdown")
 
     albums = saavn_search(text, "album")
     songs = saavn_search(text, "song")
 
-    bot.delete_message(message.chat.id, status.message_id)
+    try:
+        bot.delete_message(message.chat.id, status.message_id)
+    except Exception:
+        pass
 
     if not albums and not songs:
-        bot.reply_to(message, "❌ பாடல்களோ ஆல்பங்களோ கிடைக்கவில்லை.")
+        bot.reply_to(message, "❌ Paadalgal kidaikkavillai. Correct spellings pottu thedunga.")
         return
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     if albums:
-        alb = albums[0]
-        markup.add(types.InlineKeyboardButton(text=f"💿 Download Album: {clean_txt(alb.get('title'))}", callback_data=f"alb_{alb.get('id')}"))
+        for alb in albums[:2]:
+            alb_id = alb.get('id')
+            alb_title = clean_txt(alb.get('title'))
+            if alb_id and alb_title:
+                markup.add(types.InlineKeyboardButton(text=f"💿 Download Album: {alb_title}", callback_data=f"alb_{alb_id}"))
 
     for s in songs[:6]:
-        markup.add(types.InlineKeyboardButton(text=f"🎵 {clean_txt(s.get('title'))}", callback_data=f"sng_{s.get('id')}"))
+        s_id = s.get('id')
+        s_title = clean_txt(s.get('title'))
+        if s_id and s_title:
+            markup.add(types.InlineKeyboardButton(text=f"🎵 {s_title}", callback_data=f"sng_{s_id}"))
 
-    bot.send_message(message.chat.id, f"🎧 *'{text}' முடிவுகள்:*", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(message.chat.id, f"🎧 *'{text}' results:*", reply_markup=markup, parse_mode="Markdown")
 
-# --- 5. CRASH-PROOF SAFE POLLER ---
+# --- 4. SAFE POLLER ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
-    
-    # பழைய Session-களைத் துண்டித்து 3 நொடிகள் அமைதி காக்கும்
     try:
         bot.remove_webhook()
     except Exception:
         pass
-    time.sleep(3)
+    time.sleep(2)
 
-    # Infinite Reconnect Loop (எந்த 409 எரர் வந்தாலும் பாட் நிற்காது)
     while True:
         try:
             bot.polling(none_stop=True, interval=0, timeout=20)
