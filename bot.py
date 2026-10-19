@@ -1,12 +1,14 @@
 import os
 import re
 import time
+import base64
 import threading
 import requests
 from flask import Flask
 import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
+from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
@@ -49,51 +51,80 @@ def saavn_search(query, search_type="album"):
 def get_album_tracks_by_name(album_name):
     url = "https://www.jiosaavn.com/api.php"
     params = {
+        "__call": "search.getAlbumResults",
+        "_marker": "0",
+        "q": album_name,
+        "n": "1",
+        "p": "1",
+        "ctx": "web6dot0",
+        "_format": "json"
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=8).json()
+        results = r.get('results', [])
+        if results:
+            alb_id = results[0].get('id')
+            p_det = {
+                "__call": "content.getAlbumDetails",
+                "_marker": "0",
+                "albumid": str(alb_id),
+                "ctx": "web6dot0",
+                "_format": "json"
+            }
+            det = requests.get(url, params=p_det, headers=headers, timeout=8).json()
+            songs = det.get('list', []) or det.get('songs', [])
+            if songs:
+                return songs
+    except Exception:
+        pass
+
+    # Fallback to autocomplete search
+    params2 = {
         "__call": "autocomplete.get",
         "_marker": "0",
         "query": album_name,
         "ctx": "web6dot0",
         "_format": "json"
     }
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=8).json()
+        res = requests.get(url, params=params2, headers=headers, timeout=8).json()
         songs = res.get('songs', {}).get('data', [])
-        
-        matched_songs = []
-        album_lower = album_name.lower()
-        
-        for s in songs:
-            s_album = clean_txt(s.get('album', '')).lower()
-            if album_lower in s_album or s.get('id'):
-                matched_songs.append(s)
-                
-        if not matched_songs:
-            matched_songs = songs[:8]
-            
-        return matched_songs
+        return songs[:10]
     except Exception:
         return []
 
-def extract_direct_url(encrypted_url):
-    url = "https://www.jiosaavn.com/api.php"
-    params = {
-        "__call": "song.generateAuthToken",
-        "url": encrypted_url,
-        "bitrate": "320",
-        "api_version": "4",
-        "_format": "json",
-        "ctx": "web6dot0",
-        "_marker": "0"
-    }
-    headers = {"User-Agent": "Mozilla/5.0"}
+# DIRECT DECRYPT OF ENCRYPTED MEDIA URL (100% Reliable Native Decryption)
+def decrypt_media_url(enc_url):
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=10).json()
-        auth_url = res.get('auth_url', '')
-        if auth_url:
-            return auth_url.replace("&amp;", "&").split("?")[0]
+        key = b"38346591"
+        enc_data = base64.b64decode(enc_url.strip())
+        cipher = DES.new(key, DES.MODE_ECB)
+        dec_data = cipher.decrypt(enc_data)
+        pad = dec_data[-1]
+        dec_url = dec_data[:-pad].decode('utf-8')
+        # Replace preview bitrate with 320kbps original audio
+        dec_url = dec_url.replace("_96.mp4", "_320.mp4").replace(".mp4", ".mp3")
+        return dec_url
     except Exception:
-        pass
+        # Fallback to direct token generator
+        url = "https://www.jiosaavn.com/api.php"
+        params = {
+            "__call": "song.generateAuthToken",
+            "url": enc_url,
+            "bitrate": "320",
+            "api_version": "4",
+            "_format": "json",
+            "ctx": "web6dot0",
+            "_marker": "0"
+        }
+        try:
+            res = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=8).json()
+            auth_url = res.get('auth_url', '')
+            if auth_url:
+                return auth_url.replace("&amp;", "&").split("?")[0]
+        except Exception:
+            pass
     return None
 
 def send_audio_track(chat_id, s_data):
@@ -102,11 +133,27 @@ def send_audio_track(chat_id, s_data):
     album = clean_txt(s_data.get('album', 'Single'))
     year = str(s_data.get('year', ''))
 
+    # Get media URL
     enc_url = s_data.get('encrypted_media_url')
+    if not enc_url and s_data.get('id'):
+        # Fetch detailed song object if not present
+        url = "https://www.jiosaavn.com/api.php"
+        params = {"__call": "song.getDetails", "pids": s_data.get('id'), "_marker": "0", "ctx": "web6dot0", "_format": "json"}
+        try:
+            r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=6).json()
+            s_obj = r.get(s_data.get('id'), {})
+            enc_url = s_obj.get('encrypted_media_url')
+            if s_obj.get('song'):
+                title = clean_txt(s_obj.get('song'))
+            if s_obj.get('primary_artists'):
+                artist = clean_txt(s_obj.get('primary_artists'))
+        except Exception:
+            pass
+
     if not enc_url:
         return False
 
-    direct_link = extract_direct_url(enc_url)
+    direct_link = decrypt_media_url(enc_url)
     if not direct_link:
         return False
 
@@ -246,15 +293,15 @@ def callback_album(call):
     album_name = call.data.replace("alb_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text=f"'{album_name}' songs loading...")
+    bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் தயாராகின்றன...")
 
     songs = get_album_tracks_by_name(album_name)
 
     if not songs:
-        bot.send_message(target_chat_id, "❌ Paadalgal kidaikkavillai.")
+        bot.send_message(target_chat_id, "❌ பாடல்கள் கிடைக்கவில்லை.")
         return
 
-    bot.send_message(target_chat_id, f"⬇️ *{album_name}* album-il ninnu {len(songs)} paattukal download cheyyunnu...", parse_mode="Markdown")
+    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
 
     for s in songs:
         send_audio_track(target_chat_id, s)
@@ -264,7 +311,7 @@ def callback_album(call):
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
-    bot.answer_callback_query(call.id, text="Downloading song...")
+    bot.answer_callback_query(call.id, text="பாடல் பதிவிறக்கம் ஆகிறது...")
 
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -281,9 +328,9 @@ def callback_song(call):
         if s_data:
             send_audio_track(target_chat_id, s_data)
         else:
-            bot.send_message(target_chat_id, "❌ Paadal kidaikkavillai.")
+            bot.send_message(target_chat_id, "❌ பாடல் கிடைக்கவில்லை.")
     except Exception:
-        bot.send_message(target_chat_id, "❌ Error undaayi.")
+        bot.send_message(target_chat_id, "❌ பிழை ஏற்பட்டது.")
 
 # --- 5. DIRECT TEXT FALLBACK ---
 @bot.message_handler(func=lambda msg: True)
