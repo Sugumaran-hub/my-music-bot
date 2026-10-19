@@ -1,13 +1,14 @@
 import os
 import re
 import time
+import base64
 import threading
 import requests
 from flask import Flask
 import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
-from yt_dlp import YoutubeDL
+from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
@@ -29,7 +30,7 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# JIOSAAVN AUTOCOMPLETE ENGINE
+# JIOSAAVN AUTOCOMPLETE
 def saavn_search(query, search_type="album"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -87,32 +88,66 @@ def fetch_album_details_by_token(token_or_id):
 
     return None, []
 
-# DOWNLOAD REAL 320KBPS AUDIO USING STREAM MATCHER
-def download_real_audio(title, artist, album, cover_url, year, chat_id):
-    filename = f"track_{chat_id}_{abs(hash(title)) % 100000}"
-    final_mp3 = f"{filename}.mp3"
+# NATIVE DES DECRYPTION FOR DIRECT JIOSAAVN MEDIA URL
+def decrypt_media_url(enc_url):
+    try:
+        key = b"38346591"
+        enc_data = base64.b64decode(enc_url.strip())
+        cipher = DES.new(key, DES.MODE_ECB)
+        dec_data = cipher.decrypt(enc_data)
+        pad = dec_data[-1]
+        dec_url = dec_data[:-pad].decode('utf-8')
+        # உயர்தர 320kbps ஆடியோ ஸ்ட்ரீமை நேரடியாக எடுத்தல்
+        dec_url = dec_url.replace("_96.mp4", "_320.mp4")
+        return dec_url
+    except Exception:
+        pass
+    return None
+
+def send_audio_track(chat_id, s_data):
+    title = clean_txt(s_data.get('song') or s_data.get('title', 'Track'))
+    artist = clean_txt(s_data.get('primary_artists') or s_data.get('music', 'Unknown'))
+    album = clean_txt(s_data.get('album', 'Single'))
+    year = str(s_data.get('year', ''))
+
+    enc_url = s_data.get('encrypted_media_url')
+    if not enc_url and s_data.get('id'):
+        url = "https://www.jiosaavn.com/api.php"
+        params = {"__call": "song.getDetails", "pids": s_data.get('id'), "_marker": "0", "ctx": "web6dot0", "_format": "json"}
+        try:
+            r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=6).json()
+            s_obj = r.get(s_data.get('id'), {})
+            enc_url = s_obj.get('encrypted_media_url')
+            if s_obj.get('song'):
+                title = clean_txt(s_obj.get('song'))
+            if s_obj.get('primary_artists'):
+                artist = clean_txt(s_obj.get('primary_artists'))
+        except Exception:
+            pass
+
+    if not enc_url:
+        return False
+
+    direct_link = decrypt_media_url(enc_url)
+    if not direct_link:
+        return False
+
+    cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
+    # MP4 ஆடியோவை டெலிகிராம் ஆடியோ பிளேயருக்கு உகந்ததாகப் பதிவேற்றுதல்
+    filename = f"track_{chat_id}_{abs(hash(title)) % 100000}.m4a"
     thumb_file = f"thumb_{chat_id}_{abs(hash(title)) % 100000}.jpg"
 
-    # Search directly for official audio
-    query = f"{title} {artist} audio"
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'default_search': 'ytsearch1:',
-        'outtmpl': f'{filename}.%(ext)s',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '320',
-        }],
-        'quiet': True,
-        'noplaylist': True
-    }
-
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.download([query])
+        r = requests.get(direct_link, stream=True, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        with open(filename, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=16384):
+                if chunk:
+                    f.write(chunk)
 
-        if not os.path.exists(final_mp3):
+        # அசல் ஆடியோ ஃபைலா என்பதை உறுதி செய்தல் (> 500 KB)
+        if os.path.getsize(filename) < 500000:
+            if os.path.exists(filename):
+                os.remove(filename)
             return False
 
         has_thumb = False
@@ -122,21 +157,12 @@ def download_real_audio(title, artist, album, cover_url, year, chat_id):
                 with open(thumb_file, 'wb') as f_thumb:
                     f_thumb.write(img_data)
                 has_thumb = True
-
-                audio = ID3(final_mp3)
-                audio.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data))
-                audio.add(TIT2(encoding=3, text=title))
-                audio.add(TPE1(encoding=3, text=artist))
-                audio.add(TALB(encoding=3, text=album))
-                if year:
-                    audio.add(TYER(encoding=3, text=year))
-                audio.save(final_mp3)
             except Exception:
                 pass
 
         caption = f"Title: {title}\nAlbum: {album}\nSingers: {artist}"
 
-        with open(final_mp3, 'rb') as audio_file:
+        with open(filename, 'rb') as audio_file:
             if has_thumb and os.path.exists(thumb_file):
                 with open(thumb_file, 'rb') as t_file:
                     bot.send_audio(
@@ -156,18 +182,23 @@ def download_real_audio(title, artist, album, cover_url, year, chat_id):
                     caption=caption
                 )
 
-        if os.path.exists(final_mp3):
-            os.remove(final_mp3)
+        if os.path.exists(filename):
+            os.remove(filename)
         if os.path.exists(thumb_file):
             os.remove(thumb_file)
         return True
-
     except Exception:
-        if os.path.exists(final_mp3):
-            os.remove(final_mp3)
+        if os.path.exists(filename):
+            os.remove(filename)
         if os.path.exists(thumb_file):
             os.remove(thumb_file)
         return False
+
+# பின்னணியில் ஆல்பம் டவுன்லோட் செய்யும் செயல்பாடு (No Freezing)
+def process_album_download(songs, chat_id):
+    for s in songs:
+        send_audio_track(chat_id, s)
+        time.sleep(1)
 
 # --- 1. /START COMMAND ---
 @bot.message_handler(commands=['start'])
@@ -262,7 +293,7 @@ def handle_inline(query):
             thumb = sng.get('image', '').replace("50x50", "500x500")
 
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps MP3", callback_data=f"sng_{s_id}"))
+            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps", callback_data=f"sng_{s_id}"))
 
             msg_content = f"Title: {title}\nSingers: {desc}"
 
@@ -279,40 +310,36 @@ def handle_inline(query):
 
     bot.answer_inline_query(query.id, results, cache_time=1)
 
-# --- 3. ALBUM FULL DOWNLOAD ---
+# --- 3. ALBUM FULL DOWNLOAD (BACKGROUND THREAD) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     stored = album_token_store.get(call.data, {})
     token = stored.get("token")
     album_name = stored.get("name", "Album")
-    year = stored.get("year", "")
     cached_songs = stored.get("songs")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text=f"'{album_name}' songs download aagudhu...")
+    bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் பதிவிறக்கமாகின்றன...")
 
     songs = cached_songs
     if not songs:
         _, songs = fetch_album_details_by_token(token or album_name)
 
     if not songs:
-        bot.send_message(target_chat_id, "❌ Paadalgal kidaikkavillai.")
+        bot.send_message(target_chat_id, "❌ பாடல்கள் கிடைக்கவில்லை.")
         return
 
-    bot.send_message(target_chat_id, f"⬇️ *{album_name}* aalbathilirundhu {len(songs)} paadalkal padhivirakkam seiyyappadukinrana...", parse_mode="Markdown")
+    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் அனுப்பப்படுகின்றன...", parse_mode="Markdown")
 
-    for s in songs:
-        title = clean_txt(s.get('song') or s.get('title', 'Track'))
-        artist = clean_txt(s.get('primary_artists') or s.get('music', 'Unknown'))
-        cover_url = s.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
-        download_real_audio(title, artist, album_name, cover_url, year, target_chat_id)
+    # பாட் ஃப்ரீஸ் ஆகாமல் இருக்க தனி Background Thread-ல் இயக்குதல்
+    threading.Thread(target=process_album_download, args=(songs, target_chat_id)).start()
 
 # --- 4. SINGLE SONG DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
-    bot.answer_callback_query(call.id, text="Paadal download aagiradhu...")
+    bot.answer_callback_query(call.id, text="பாடல் பதிவிறக்கம் ஆகிறது...")
 
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -327,16 +354,11 @@ def callback_song(call):
         res = requests.get(url, params=params, headers=headers, timeout=10).json()
         s_data = res.get(s_id, {})
         if s_data:
-            title = clean_txt(s_data.get('song') or s_data.get('title', 'Track'))
-            artist = clean_txt(s_data.get('primary_artists') or s_data.get('music', 'Unknown'))
-            album = clean_txt(s_data.get('album', 'Single'))
-            year = str(s_data.get('year', ''))
-            cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
-            download_real_audio(title, artist, album, cover_url, year, target_chat_id)
+            threading.Thread(target=send_audio_track, args=(target_chat_id, s_data)).start()
         else:
-            bot.send_message(target_chat_id, "❌ Paadal kidaikkavillai.")
+            bot.send_message(target_chat_id, "❌ பாடல் கிடைக்கவில்லை.")
     except Exception:
-        bot.send_message(target_chat_id, "❌ Pizhai erpatatadhu.")
+        bot.send_message(target_chat_id, "❌ பிழை ஏற்பட்டது.")
 
 # --- 5. DIRECT TEXT FALLBACK ---
 @bot.message_handler(func=lambda msg: True)
