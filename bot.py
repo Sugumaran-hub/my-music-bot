@@ -26,7 +26,7 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# JIOSAAVN DIRECT SEARCH & RESOLVER
+# JIOSAAVN AUTOCOMPLETE
 def saavn_search(query, search_type="album"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -45,7 +45,7 @@ def saavn_search(query, search_type="album"):
     except Exception:
         return []
 
-# ACCURATE ALBUM TRACK EXTRACTOR VIA SONG SEARCH MATCHING
+# ACCURATE ALBUM TRACK EXTRACTOR
 def get_album_tracks_by_name(album_name):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -60,7 +60,6 @@ def get_album_tracks_by_name(album_name):
         res = requests.get(url, params=params, headers=headers, timeout=8).json()
         songs = res.get('songs', {}).get('data', [])
         
-        # Filter songs belonging to this exact album or matching title
         matched_songs = []
         album_lower = album_name.lower()
         
@@ -69,7 +68,6 @@ def get_album_tracks_by_name(album_name):
             if album_lower in s_album or s.get('id'):
                 matched_songs.append(s)
                 
-        # Fallback: if filtered is empty, return top songs from autocomplete
         if not matched_songs:
             matched_songs = songs[:8]
             
@@ -112,7 +110,6 @@ def send_audio_track(chat_id, s_data):
     if not direct_link:
         return False
 
-    # Ensure clean official high-res cover art (Replacing low-res or bad thumbnails)
     cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
     filename = f"track_{chat_id}_{abs(hash(title)) % 100000}.mp3"
 
@@ -249,7 +246,7 @@ def callback_album(call):
     album_name = call.data.replace("alb_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் தயாராகின்றன...")
+    bot.answer_callback_query(call.id, text=f"'{album_name}' songs loading...")
 
     songs = get_album_tracks_by_name(album_name)
 
@@ -257,7 +254,7 @@ def callback_album(call):
         bot.send_message(target_chat_id, "❌ Paadalgal kidaikkavillai.")
         return
 
-    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
+    bot.send_message(target_chat_id, f"⬇️ *{album_name}* album-il ninnu {len(songs)} paattukal download cheyyunnu...", parse_mode="Markdown")
 
     for s in songs:
         send_audio_track(target_chat_id, s)
@@ -286,7 +283,7 @@ def callback_song(call):
         else:
             bot.send_message(target_chat_id, "❌ Paadal kidaikkavillai.")
     except Exception:
-        bot.send_message(target_chat_id, "❌ Pizhai erpatatadhu.")
+        bot.send_message(target_chat_id, "❌ Error undaayi.")
 
 # --- 5. DIRECT TEXT FALLBACK ---
 @bot.message_handler(func=lambda msg: True)
@@ -298,7 +295,7 @@ if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
     try:
         bot.remove_webhook()
-    exceptException:
+    except Exception:
         pass
     time.sleep(2)
 
