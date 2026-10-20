@@ -12,19 +12,32 @@ from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
+# Render URL சுய-விழிப்புணர்வுக்கான முகவரி
+RENDER_APP_URL = "https://my-music-bot-1nw7.onrender.com"
+
 @app.route('/')
 def home():
-    return "Acoustic Vault Online!"
+    return "Acoustic Vault Online & Active 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
+# சர்வர் தூங்காமல் இருக்க 10 நிமிடத்திற்கு ஒருமுறை தன்னைத்தானே அழைக்கும் த்ரெட்
+def keep_alive_ping():
+    time.sleep(60)
+    while True:
+        try:
+            requests.get(RENDER_APP_URL, timeout=10)
+        except Exception:
+            pass
+        time.sleep(600)
+
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(BOT_TOKEN)
 
 album_token_store = {}
-user_quality_pref = {}  # Store quality per user: '320', '160', '96'
+user_quality_pref = {}
 
 def clean_txt(text):
     if not text:
@@ -99,7 +112,6 @@ def decrypt_media_url(enc_url, bitrate="320"):
         pad = dec_data[-1]
         dec_url = dec_data[:-pad].decode('utf-8')
         
-        # User Quality Bitrate Substitution
         target_br = f"_{bitrate}.mp4" if bitrate in ["320", "160", "96"] else "_320.mp4"
         dec_url = dec_url.replace("_96.mp4", target_br)
         return dec_url
@@ -113,7 +125,6 @@ def send_audio_track(chat_id, s_data):
     album = clean_txt(s_data.get('album', 'Single'))
     year = str(s_data.get('year', ''))
 
-    # Fetch full song details if encrypted_media_url missing
     enc_url = s_data.get('encrypted_media_url')
     if not enc_url and s_data.get('id'):
         url = "https://www.jiosaavn.com/api.php"
@@ -221,7 +232,7 @@ def start_cmd(message):
 def quality_menu(call):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("⚡ 320kbps Extreme (Default / Best for IEM)", callback_data="set_q_320"),
+        types.InlineKeyboardButton("⚡ 320kbps Extreme (Default / Best)", callback_data="set_q_320"),
         types.InlineKeyboardButton("🎧 160kbps High Quality (Balanced)", callback_data="set_q_160"),
         types.InlineKeyboardButton("💾 96kbps Medium (Data Saver)", callback_data="set_q_96")
     )
@@ -362,7 +373,7 @@ def callback_album(call):
     bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
     threading.Thread(target=process_album_download, args=(songs, target_chat_id)).start()
 
-# --- 4. SINGLE SONG DOWNLOAD (FIXED SONG DETECTOR) ---
+# --- 4. SINGLE SONG DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
@@ -393,9 +404,11 @@ def callback_song(call):
 def direct_text_search(message):
     start_cmd(message)
 
-# --- 6. CRASH-PROOF POLLER ---
+# --- 6. CRASH-PROOF POLLER & AUTO PINGER ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
+    threading.Thread(target=keep_alive_ping, daemon=True).start()
+    
     try:
         bot.remove_webhook()
     except Exception:
