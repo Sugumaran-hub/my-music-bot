@@ -12,12 +12,17 @@ from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
+# Render மற்றும் Cron-Job-க்கு எப்போதும் 200 OK தரும் ரூட்
 @app.route('/')
 def home():
-    return "Acoustic Vault Online!"
+    return "Acoustic Vault Online & Active 24/7!", 200
+
+@app.route('/healthz')
+def health():
+    return "OK", 200
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -200,7 +205,7 @@ def process_album_download(songs, chat_id):
         send_audio_track(chat_id, s)
         time.sleep(1)
 
-# --- 1. /START COMMAND WITH QUALITY TOGGLE ---
+# --- 1. /START COMMAND ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     chat_id = message.chat.id
@@ -391,8 +396,9 @@ def callback_song(call):
 def direct_text_search(message):
     start_cmd(message)
 
-# --- 6. CONTINUOUS POLLING RUNNER ---
+# --- 6. CRASH-PROOF POLLER & THREADED WEB SERVER ---
 if __name__ == '__main__':
+    # Web சர்வரை தனி த்ரெட்டில் தொடங்குகிறோம் (Port 10000-ல் 200 OK தரும்)
     threading.Thread(target=run_web, daemon=True).start()
     
     try:
@@ -401,6 +407,7 @@ if __name__ == '__main__':
         pass
     time.sleep(2)
 
+    # Polling லூப்
     while True:
         try:
             bot.polling(none_stop=True, interval=0, timeout=20)
