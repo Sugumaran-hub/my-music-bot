@@ -7,12 +7,11 @@ import requests
 from flask import Flask
 import telebot
 from telebot import types
-from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
+from mutagen.mp4 import MP4, MP4Cover
 from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
-# Sariyana Render URL (Small letter L: lnw7)
 RENDER_APP_URL = "https://my-music-bot-lnw7.onrender.com"
 
 @app.route('/')
@@ -115,7 +114,7 @@ def decrypt_media_url(enc_url, bitrate="320"):
 
 def send_audio_track(chat_id, s_data):
     title = clean_txt(s_data.get('song') or s_data.get('title', 'Track'))
-    artist = clean_txt(s_data.get('primary_artists') or s_data.get('music', 'Unknown'))
+    artist = clean_txt(s_data.get('primary_artists') or s_data.get('music', 'Unknown Artist'))
     album = clean_txt(s_data.get('album', 'Single'))
     year = str(s_data.get('year', ''))
 
@@ -143,8 +142,11 @@ def send_audio_track(chat_id, s_data):
         return False
 
     cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
-    filename = f"track_{chat_id}_{abs(hash(title)) % 100000}.m4a"
-    thumb_file = f"thumb_{chat_id}_{abs(hash(title)) % 100000}.jpg"
+    
+    # Sariyana Song Title File Name (Special characters நீக்கிவிட்டு)
+    safe_title = re.sub(r'[\\/*?:"<>|]', "", title)
+    filename = f"{safe_title}.m4a"
+    thumb_file = f"thumb_{chat_id}.jpg"
 
     try:
         r = requests.get(direct_link, stream=True, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
@@ -159,6 +161,7 @@ def send_audio_track(chat_id, s_data):
             return False
 
         has_thumb = False
+        img_data = None
         if cover_url:
             try:
                 img_data = requests.get(cover_url, timeout=10).content
@@ -167,6 +170,20 @@ def send_audio_track(chat_id, s_data):
                 has_thumb = True
             except Exception:
                 pass
+
+        # M4A/MP4 Native Audio Metadata Tags Embedding
+        try:
+            audio = MP4(filename)
+            audio['\xa9nam'] = [title]       # Track Title
+            audio['\xa9ART'] = [artist]      # Artist Name
+            audio['\xa9alb'] = [album]       # Album Title
+            if year:
+                audio['\xa9day'] = [year]    # Release Year
+            if img_data:
+                audio['covr'] = [MP4Cover(img_data, imageformat=MP4Cover.FORMAT_JPEG)]  # Embedded Cover Art
+            audio.save()
+        except Exception:
+            pass
 
         caption = f"Title: {title}\nAlbum: {album}\nSingers: {artist}"
 
