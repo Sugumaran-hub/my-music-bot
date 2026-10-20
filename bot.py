@@ -12,7 +12,9 @@ from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
-# Render மற்றும் Cron-Job-க்கு எப்போதும் 200 OK தரும் ரூட்
+# Sariyana Render URL (Small letter L: lnw7)
+RENDER_APP_URL = "https://my-music-bot-lnw7.onrender.com"
+
 @app.route('/')
 def home():
     return "Acoustic Vault Online & Active 24/7!", 200
@@ -398,7 +400,6 @@ def direct_text_search(message):
 
 # --- 6. CRASH-PROOF POLLER & THREADED WEB SERVER ---
 if __name__ == '__main__':
-    # Web சர்வரை தனி த்ரெட்டில் தொடங்குகிறோம் (Port 10000-ல் 200 OK தரும்)
     threading.Thread(target=run_web, daemon=True).start()
     
     try:
@@ -407,7 +408,6 @@ if __name__ == '__main__':
         pass
     time.sleep(2)
 
-    # Polling லூப்
     while True:
         try:
             bot.polling(none_stop=True, interval=0, timeout=20)
