@@ -4,7 +4,7 @@ import time
 import base64
 import threading
 import requests
-from flask import Flask, request
+from flask import Flask
 import telebot
 from telebot import types
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TYER
@@ -12,9 +12,15 @@ from Crypto.Cipher import DES
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-RENDER_APP_URL = "https://my-music-bot-1nw7.onrender.com"
+@app.route('/')
+def home():
+    return "Acoustic Vault Online!"
 
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(BOT_TOKEN)
 
 album_token_store = {}
@@ -24,20 +30,6 @@ def clean_txt(text):
     if not text:
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
-
-# --- WEBHOOK ENDPOINTS ---
-@app.route('/')
-def home():
-    return "Acoustic Vault Online & Active 24/7!"
-
-@app.route(f"/{BOT_TOKEN}", methods=['POST'])
-def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    return '', 403
 
 # JIOSAAVN AUTOCOMPLETE
 def saavn_search(query, search_type="album"):
@@ -232,7 +224,7 @@ def quality_menu(call):
         types.InlineKeyboardButton("💾 96kbps Medium (Data Saver)", callback_data="set_q_96")
     )
     bot.edit_message_text(
-        "🎚 **Viruppamaana audio tharathai choose seiyavum:**",
+        "🎚 **விருப்பமான ஆடியோ தரத்தைத் தேர்வு செய்யவும்:**",
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         reply_markup=markup,
@@ -243,7 +235,7 @@ def quality_menu(call):
 def apply_quality(call):
     q_val = call.data.replace("set_q_", "")
     user_quality_pref[call.message.chat.id] = q_val
-    bot.answer_callback_query(call.id, text=f"Audio quality {q_val}kbps-aaga maatrrappattadhu!")
+    bot.answer_callback_query(call.id, text=f"Audio quality {q_val}kbps-ஆக அமைக்கப்பட்டது!")
     start_cmd(call.message)
 
 # --- 2. EXACT INLINE CARDS ---
@@ -355,17 +347,17 @@ def callback_album(call):
     cached_songs = stored.get("songs")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
-    bot.answer_callback_query(call.id, text=f"'{album_name}' paadalkal ready aagudhu...")
+    bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் தயாராகின்றன...")
 
     songs = cached_songs
     if not songs:
         _, songs = fetch_album_details_by_token(token or album_name)
 
     if not songs:
-        bot.send_message(target_chat_id, "❌ Paadalgal kidaikkavillai.")
+        bot.send_message(target_chat_id, "❌ பாடல்கள் கிடைக்கவில்லை.")
         return
 
-    bot.send_message(target_chat_id, f"⬇️ *{album_name}* aalbathilirundhu {len(songs)} paadalkal anuppappadukinrana...", parse_mode="Markdown")
+    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
     threading.Thread(target=process_album_download, args=(songs, target_chat_id)).start()
 
 # --- 4. SINGLE SONG DOWNLOAD ---
@@ -373,7 +365,7 @@ def callback_album(call):
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
-    bot.answer_callback_query(call.id, text="Paadal download aagiradhu...")
+    bot.answer_callback_query(call.id, text="பாடல் பதிவிறக்கம் ஆகிறது...")
 
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -390,26 +382,27 @@ def callback_song(call):
         if s_data and (s_data.get('encrypted_media_url') or s_data.get('id')):
             threading.Thread(target=send_audio_track, args=(target_chat_id, s_data)).start()
         else:
-            bot.send_message(target_chat_id, "❌ Paadal kidaikkavillai.")
+            bot.send_message(target_chat_id, "❌ பாடல் கிடைக்கவில்லை.")
     except Exception:
-        bot.send_message(target_chat_id, "❌ Pizhai erpatatadhu.")
+        bot.send_message(target_chat_id, "❌ பிழை ஏற்பட்டது.")
 
 # --- 5. DIRECT TEXT FALLBACK ---
 @bot.message_handler(func=lambda msg: True)
 def direct_text_search(message):
     start_cmd(message)
 
-# --- 6. WEBHOOK REGISTRATION RUNNER ---
+# --- 6. CONTINUOUS POLLING RUNNER ---
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))
-    # Telegram-kku namadhu Render Webhook URL-ai register seigai
+    threading.Thread(target=run_web, daemon=True).start()
+    
     try:
         bot.remove_webhook()
-        time.sleep(1)
-        webhook_url = f"{RENDER_APP_URL}/{BOT_TOKEN}"
-        bot.set_webhook(url=webhook_url)
     except Exception:
         pass
+    time.sleep(2)
 
-    # Flask app start seigirom (Polling loop thevaiye illai)
-    app.run(host="0.0.0.0", port=port)
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception:
+            time.sleep(3)
