@@ -10,6 +10,7 @@ from telebot import types
 from mutagen.mp4 import MP4, MP4Cover
 from Crypto.Cipher import DES
 
+# --- 1. WEB SERVER & RENDER KEEP-ALIVE ---
 app = Flask(__name__)
 
 RENDER_APP_URL = "https://my-music-bot-lnw7.onrender.com"
@@ -26,8 +27,20 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
+def keep_alive_ping():
+    """Render Free Tier 15-minute sleep-ah thadukkum background auto-ping."""
+    time.sleep(30)
+    while True:
+        try:
+            requests.get(f"{RENDER_APP_URL}/healthz", timeout=10)
+        except Exception:
+            pass
+        time.sleep(600)  # Every 10 minutes once ping pannum
+
+# --- 2. BOT INITIALIZATION ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-bot = telebot.TeleBot(BOT_TOKEN)
+# num_threads=4: Parallel inline search and downloads freeze aagama run aaga
+bot = telebot.TeleBot(BOT_TOKEN, num_threads=4)
 
 album_token_store = {}
 user_quality_pref = {}
@@ -37,7 +50,7 @@ def clean_txt(text):
         return ""
     return re.sub(r'<.*?>', '', str(text)).replace('&quot;', '"').replace('&amp;', '&').replace('&copy;', '').strip()
 
-# JIOSAAVN AUTOCOMPLETE
+# --- 3. JIOSAAVN AUTOCOMPLETE & DETAILS ---
 def saavn_search(query, search_type="album"):
     url = "https://www.jiosaavn.com/api.php"
     params = {
@@ -49,14 +62,13 @@ def saavn_search(query, search_type="album"):
     }
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=6).json()
+        res = requests.get(url, params=params, headers=headers, timeout=5).json()
         if search_type == "album":
             return res.get('albums', {}).get('data', [])
         return res.get('songs', {}).get('data', [])
     except Exception:
         return []
 
-# ACCURATE ALBUM DETAILS & FULL SONGS FETCHER
 def fetch_album_details_by_token(token_or_id):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     url = "https://www.jiosaavn.com/api.php"
@@ -95,7 +107,7 @@ def fetch_album_details_by_token(token_or_id):
 
     return None, []
 
-# NATIVE DES DECRYPTION FOR DIRECT JIOSAAVN MEDIA URL
+# --- 4. MEDIA URL DECRYPTION ---
 def decrypt_media_url(enc_url, bitrate="320"):
     try:
         key = b"38346591"
@@ -112,16 +124,30 @@ def decrypt_media_url(enc_url, bitrate="320"):
         pass
     return None
 
+# --- 5. AUDIO PROCESSOR & TRANSMITTER ---
 def send_audio_track(chat_id, s_data):
     title = clean_txt(s_data.get('song') or s_data.get('title', 'Track'))
     artist = clean_txt(s_data.get('primary_artists') or s_data.get('music', 'Unknown Artist'))
     album = clean_txt(s_data.get('album', 'Single'))
     year = str(s_data.get('year', ''))
+    
+    # Exact duration extraction for Telegram Player
+    raw_duration = s_data.get('duration') or 0
+    try:
+        duration = int(raw_duration)
+    except Exception:
+        duration = 0
 
     enc_url = s_data.get('encrypted_media_url')
     if not enc_url and s_data.get('id'):
         url = "https://www.jiosaavn.com/api.php"
-        params = {"__call": "song.getDetails", "pids": str(s_data.get('id')), "_marker": "0", "ctx": "web6dot0", "_format": "json"}
+        params = {
+            "__call": "song.getDetails",
+            "pids": str(s_data.get('id')),
+            "_marker": "0",
+            "ctx": "web6dot0",
+            "_format": "json"
+        }
         try:
             r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=6).json()
             s_obj = r.get(str(s_data.get('id')), {})
@@ -130,6 +156,11 @@ def send_audio_track(chat_id, s_data):
                 title = clean_txt(s_obj.get('song'))
             if s_obj.get('primary_artists'):
                 artist = clean_txt(s_obj.get('primary_artists'))
+            if s_obj.get('duration'):
+                try:
+                    duration = int(s_obj.get('duration'))
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -143,21 +174,20 @@ def send_audio_track(chat_id, s_data):
 
     cover_url = s_data.get('image', '').replace("150x150", "500x500").replace("50x50", "500x500")
     
-    # Sariyana Song Title File Name (Special characters நீக்கிவிட்டு)
     safe_title = re.sub(r'[\\/*?:"<>|]', "", title)
-    filename = f"{safe_title}.m4a"
-    thumb_file = f"thumb_{chat_id}.jpg"
+    # Unique file identifiers to stop overwrite collisions
+    req_uid = f"{chat_id}_{int(time.time() * 1000)}"
+    filename = f"{safe_title}_{req_uid}.m4a"
+    thumb_file = f"thumb_{req_uid}.jpg"
 
     try:
         r = requests.get(direct_link, stream=True, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
         with open(filename, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=16384):
+            for chunk in r.iter_content(chunk_size=32768):
                 if chunk:
                     f.write(chunk)
 
-        if os.path.getsize(filename) < 200000:
-            if os.path.exists(filename):
-                os.remove(filename)
+        if not os.path.exists(filename) or os.path.getsize(filename) < 200000:
             return False
 
         has_thumb = False
@@ -171,16 +201,16 @@ def send_audio_track(chat_id, s_data):
             except Exception:
                 pass
 
-        # M4A/MP4 Native Audio Metadata Tags Embedding
+        # Native MP4/M4A ID3 Tags
         try:
             audio = MP4(filename)
-            audio['\xa9nam'] = [title]       # Track Title
-            audio['\xa9ART'] = [artist]      # Artist Name
-            audio['\xa9alb'] = [album]       # Album Title
+            audio['\xa9nam'] = [title]
+            audio['\xa9ART'] = [artist]
+            audio['\xa9alb'] = [album]
             if year:
-                audio['\xa9day'] = [year]    # Release Year
+                audio['\xa9day'] = [year]
             if img_data:
-                audio['covr'] = [MP4Cover(img_data, imageformat=MP4Cover.FORMAT_JPEG)]  # Embedded Cover Art
+                audio['covr'] = [MP4Cover(img_data, imageformat=MP4Cover.FORMAT_JPEG)]
             audio.save()
         except Exception:
             pass
@@ -188,43 +218,42 @@ def send_audio_track(chat_id, s_data):
         caption = f"Title: {title}\nAlbum: {album}\nSingers: {artist}"
 
         with open(filename, 'rb') as audio_file:
-            if has_thumb and os.path.exists(thumb_file):
-                with open(thumb_file, 'rb') as t_file:
-                    bot.send_audio(
-                        chat_id=chat_id,
-                        audio=audio_file,
-                        thumb=t_file,
-                        title=title,
-                        performer=artist,
-                        caption=caption
-                    )
-            else:
+            t_file = open(thumb_file, 'rb') if (has_thumb and os.path.exists(thumb_file)) else None
+            try:
                 bot.send_audio(
                     chat_id=chat_id,
                     audio=audio_file,
+                    thumb=t_file,
                     title=title,
                     performer=artist,
+                    duration=duration if duration > 0 else None,
                     caption=caption
                 )
-
-        if os.path.exists(filename):
-            os.remove(filename)
-        if os.path.exists(thumb_file):
-            os.remove(thumb_file)
+            finally:
+                if t_file:
+                    t_file.close()
         return True
     except Exception:
-        if os.path.exists(filename):
-            os.remove(filename)
-        if os.path.exists(thumb_file):
-            os.remove(thumb_file)
         return False
+    finally:
+        # Guaranteed cleanup: stops disk space leaks on Render
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
+        if os.path.exists(thumb_file):
+            try:
+                os.remove(thumb_file)
+            except Exception:
+                pass
 
 def process_album_download(songs, chat_id):
     for s in songs:
         send_audio_track(chat_id, s)
         time.sleep(1)
 
-# --- 1. /START COMMAND ---
+# --- 6. /START COMMAND & QUALITY PREFERENCES ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     chat_id = message.chat.id
@@ -262,7 +291,7 @@ def apply_quality(call):
     bot.answer_callback_query(call.id, text=f"Audio quality {q_val}kbps-ஆக அமைக்கப்பட்டது!")
     start_cmd(call.message)
 
-# --- 2. EXACT INLINE CARDS ---
+# --- 7. LIGHTNING FAST INLINE QUERY HANDLER ---
 @bot.inline_handler(func=lambda query: True)
 def handle_inline(query):
     raw = query.query.strip()
@@ -281,6 +310,11 @@ def handle_inline(query):
     if not term:
         bot.answer_inline_query(query.id, [], cache_time=1)
         return
+
+    # Memory Leak Protection: Auto-trim cache if exceeds 150 entries
+    if len(album_token_store) > 150:
+        for _ in range(50):
+            album_token_store.pop(next(iter(album_token_store)), None)
 
     results = []
     if is_album:
@@ -302,27 +336,18 @@ def handle_inline(query):
             short_key = f"alb_{idx}_{abs(hash(token)) % 10000}"
             album_token_store[short_key] = {"token": token, "name": name, "year": year}
 
-            details, s_list = fetch_album_details_by_token(token)
-            song_count = ""
-            if s_list:
-                song_count = str(len(s_list))
-                album_token_store[short_key]["songs"] = s_list
-                if not year and details.get('year'):
-                    year = str(details.get('year'))
-
             markup = types.InlineKeyboardMarkup(row_width=2)
             btn_dl = types.InlineKeyboardButton("📥 Download Album ↗️", callback_data=short_key)
             btn_again = types.InlineKeyboardButton("🔍 Search again ↗️", switch_inline_query_current_chat="album: ")
             markup.add(btn_dl, btn_again)
 
-            total_str = f"Total songs: {song_count}\n" if song_count else "Total songs: 7\n"
             year_str = f"Year: {year}" if year else "Year: 2008"
 
             msg = (
                 f"Album: {name}\n"
                 f"Description: {desc}\n"
                 f"Language: Tamil\n"
-                f"{total_str}"
+                f"Total songs: Click Download to Fetch\n"
                 f"{year_str}"
             )
 
@@ -330,7 +355,7 @@ def handle_inline(query):
                 types.InlineQueryResultArticle(
                     id=short_key,
                     title=name,
-                    description=f"{year} · {desc}",
+                    description=f"{year} · {desc}" if year else desc,
                     thumbnail_url=thumb if thumb else None,
                     input_message_content=types.InputTextMessageContent(msg),
                     reply_markup=markup
@@ -345,7 +370,7 @@ def handle_inline(query):
             thumb = sng.get('image', '').replace("50x50", "500x500")
 
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬇️ Download 320kbps", callback_data=f"sng_{s_id}"))
+            markup.add(types.InlineKeyboardButton("⬇️ Download Audio", callback_data=f"sng_{s_id}"))
 
             msg_content = f"Title: {title}\nSingers: {desc}"
 
@@ -362,29 +387,30 @@ def handle_inline(query):
 
     bot.answer_inline_query(query.id, results, cache_time=1)
 
-# --- 3. ALBUM FULL DOWNLOAD ---
+# --- 8. ALBUM & SONG CALLBACK RECEIVERS ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("alb_"))
 def callback_album(call):
     stored = album_token_store.get(call.data, {})
     token = stored.get("token")
     album_name = stored.get("name", "Album")
-    cached_songs = stored.get("songs")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
     
     bot.answer_callback_query(call.id, text=f"'{album_name}' பாடல்கள் தயாராகின்றன...")
 
-    songs = cached_songs
+    _, songs = fetch_album_details_by_token(token or album_name)
     if not songs:
-        _, songs = fetch_album_details_by_token(token or album_name)
-
-    if not songs:
-        bot.send_message(target_chat_id, "❌ பாடல்கள் கிடைக்கவில்லை.")
+        try:
+            bot.send_message(target_chat_id, "❌ பாடல்கள் கிடைக்கவில்லை.")
+        except Exception:
+            pass
         return
 
-    bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
-    threading.Thread(target=process_album_download, args=(songs, target_chat_id)).start()
+    try:
+        bot.send_message(target_chat_id, f"⬇️ *{album_name}* ஆல்பத்திலிருந்து {len(songs)} பாடல்கள் பதிவிறக்கம் செய்யப்படுகின்றன...", parse_mode="Markdown")
+        threading.Thread(target=process_album_download, args=(songs, target_chat_id), daemon=True).start()
+    except Exception:
+        pass
 
-# --- 4. SINGLE SONG DOWNLOAD ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sng_"))
 def callback_song(call):
     s_id = call.data.replace("sng_", "")
@@ -404,20 +430,27 @@ def callback_song(call):
         res = requests.get(url, params=params, headers=headers, timeout=10).json()
         s_data = res.get(str(s_id), {}) or (res.get('songs', [{}])[0] if res.get('songs') else {})
         if s_data and (s_data.get('encrypted_media_url') or s_data.get('id')):
-            threading.Thread(target=send_audio_track, args=(target_chat_id, s_data)).start()
+            threading.Thread(target=send_audio_track, args=(target_chat_id, s_data), daemon=True).start()
         else:
             bot.send_message(target_chat_id, "❌ பாடல் கிடைக்கவில்லை.")
     except Exception:
-        bot.send_message(target_chat_id, "❌ பிழை ஏற்பட்டது.")
+        try:
+            bot.send_message(target_chat_id, "❌ பிழை ஏற்பட்டது.")
+        except Exception:
+            pass
 
-# --- 5. DIRECT TEXT FALLBACK ---
+# --- 9. FALLBACK COMMAND ---
 @bot.message_handler(func=lambda msg: True)
 def direct_text_search(message):
     start_cmd(message)
 
-# --- 6. CRASH-PROOF POLLER & THREADED WEB SERVER ---
+# --- 10. CRASH-PROOF THREADS & POLLING ---
 if __name__ == '__main__':
+    # Web server thread (Daemon)
     threading.Thread(target=run_web, daemon=True).start()
+    
+    # Render Keep-Alive Auto Ping thread (Daemon)
+    threading.Thread(target=keep_alive_ping, daemon=True).start()
     
     try:
         bot.remove_webhook()
